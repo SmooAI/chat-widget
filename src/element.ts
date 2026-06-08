@@ -23,6 +23,25 @@ export const ELEMENT_TAG = 'smooth-agent-chat';
 
 const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'placeholder', 'greeting', 'start-open', 'mode'] as const;
 
+/**
+ * Return `url` only if it is a valid absolute `http(s)` URL, else `null`.
+ *
+ * SECURITY: citation URLs originate from indexed content (web / GitHub
+ * connectors), which can be attacker-influenceable. Assigning an arbitrary
+ * string to `<a>.href` allows `javascript:`/`data:`/`vbscript:` URLs that
+ * execute on click — a stored-XSS vector. Only http(s) links are rendered as
+ * anchors; anything else falls back to plain text.
+ */
+export function safeHttpUrl(url: string | undefined | null): string | null {
+    if (!url) return null;
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+    } catch {
+        return null;
+    }
+}
+
 export class SmoothAgentChatElement extends HTMLElement {
     static get observedAttributes(): readonly string[] {
         return OBSERVED;
@@ -286,10 +305,16 @@ export class SmoothAgentChatElement extends HTMLElement {
             const li = document.createElement('li');
 
             let titleEl: HTMLElement;
-            if (c.url) {
+            // SECURITY: only absolute http(s) URLs may become a link href. A
+            // citation URL comes from indexed content (web/GitHub connectors), so
+            // an attacker-influenceable doc could carry `javascript:`/`data:`/
+            // `vbscript:` — assigning those to `a.href` is a one-click XSS. Anything
+            // that isn't a valid absolute http(s) URL renders as plain text.
+            const safeUrl = safeHttpUrl(c.url);
+            if (safeUrl) {
                 const a = document.createElement('a');
                 a.className = 'src-title';
-                a.href = c.url;
+                a.href = safeUrl;
                 a.target = '_blank';
                 a.rel = 'noopener noreferrer';
                 titleEl = a;
