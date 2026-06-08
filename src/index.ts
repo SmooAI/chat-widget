@@ -24,11 +24,13 @@ export {
     ELEMENT_TAG,
     defineChatWidget,
     mountChatWidget,
+    mountFullPageChat,
 } from './element.js';
-export type { ChatWidgetConfig, ChatWidgetTheme } from './config.js';
+export type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 export {
     ConversationController,
     type ChatMessage,
+    type Citation,
     type ConnectionStatus,
     type ConversationEvents,
     type Role,

@@ -26,12 +26,27 @@ export interface ChatWidgetTheme {
     border?: string;
 }
 
+/**
+ * Layout mode for the widget.
+ *
+ * - `"popover"` (default) — the embeddable launcher bubble + floating panel.
+ * - `"fullpage"` — no launcher; the chat fills its container/viewport with a
+ *   branded header, a scrollable message list, and an input bar. Ideal for a
+ *   dedicated support page (`/chat`, a docs site sidebar, an iframe, …).
+ */
+export type ChatWidgetMode = 'popover' | 'fullpage';
+
 export interface ChatWidgetConfig {
     /**
      * smooth-operator WebSocket endpoint, e.g.
      * `wss://realtime.prod.smooth-agent.dev` or `ws://localhost:8787/ws`.
      */
     endpoint: string;
+    /**
+     * Layout mode — `"popover"` (default, launcher + floating panel) or
+     * `"fullpage"` (chat fills its container; no launcher). See {@link ChatWidgetMode}.
+     */
+    mode?: ChatWidgetMode;
     /** UUID of the agent to start a conversation session with. */
     agentId: string;
     /** Display name for the agent (header label). Defaults to "Assistant". */
@@ -63,6 +78,7 @@ export function resolveConfig(config: ChatWidgetConfig): Required<Omit<ChatWidge
     const primaryText = theme.primaryText ?? '#f8fafc';
     return {
         endpoint: config.endpoint,
+        mode: config.mode ?? 'popover',
         agentId: config.agentId,
         agentName: config.agentName ?? 'Assistant',
         userName: config.userName,

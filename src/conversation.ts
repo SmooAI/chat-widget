@@ -15,8 +15,10 @@
  *
  * The controller is UI-agnostic: it emits typed events and the view renders them.
  */
-import { ProtocolError, SmoothAgentClient } from '@smooai/smooth-operator';
+import { type Citation, ProtocolError, SmoothAgentClient } from '@smooai/smooth-operator';
 import type { ChatWidgetConfig } from './config.js';
+
+export type { Citation };
 
 export type Role = 'user' | 'assistant';
 
@@ -27,6 +29,13 @@ export interface ChatMessage {
     text: string;
     /** True while an assistant message is still streaming. */
     streaming: boolean;
+    /**
+     * Sources that grounded an assistant answer, when the terminal
+     * `eventual_response` carried any. Optional + back-compatible: absent when
+     * the turn used no knowledge sources (or for user messages). Read
+     * defensively off the terminal event — see {@link extractCitations}.
+     */
+    citations?: Citation[];
 }
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'ready' | 'error' | 'closed';
@@ -46,6 +55,34 @@ function extractFinalText(response: unknown): string | null {
         return r.responseParts.filter((p): p is string => typeof p === 'string').join('\n\n');
     }
     return null;
+}
+
+/**
+ * Pull the grounding {@link Citation}s out of a terminal `eventual_response`.
+ *
+ * The protocol client types these (`eventual_response.data.data.citations`),
+ * but they're optional and back-compatible — absent when the turn used no
+ * knowledge sources. We read them defensively (tolerating their total absence,
+ * non-array shapes, and missing fields) so a server that doesn't emit them, or
+ * an older client, can't break rendering. Each citation always carries
+ * `id`/`title`/`snippet`/`score`; `url` is present only for web-sourced docs.
+ */
+function extractCitations(inner: unknown): Citation[] {
+    if (!inner || typeof inner !== 'object') return [];
+    const raw = (inner as { citations?: unknown }).citations;
+    if (!Array.isArray(raw)) return [];
+    const out: Citation[] = [];
+    for (const c of raw) {
+        if (!c || typeof c !== 'object') continue;
+        const obj = c as Record<string, unknown>;
+        const id = typeof obj.id === 'string' ? obj.id : '';
+        const title = typeof obj.title === 'string' ? obj.title : id || 'Source';
+        const snippet = typeof obj.snippet === 'string' ? obj.snippet : '';
+        const url = typeof obj.url === 'string' && obj.url ? obj.url : undefined;
+        const score = typeof obj.score === 'number' ? obj.score : 0;
+        out.push({ id, title, snippet, score, url });
+    }
+    return out;
 }
 
 export class ConversationController {
@@ -137,12 +174,18 @@ export class ConversationController {
             }
 
             const final = await turn;
-            const finalText = extractFinalText(final.data?.data?.response);
+            const inner = final.data?.data;
+            const finalText = extractFinalText(inner?.response);
             if (finalText && finalText.length > assistant.text.length) {
                 assistant.text = finalText;
             }
             if (!assistant.text) {
                 assistant.text = '(no response)';
+            }
+            // Attach grounding sources from the terminal event, when present.
+            const citations = extractCitations(inner);
+            if (citations.length > 0) {
+                assistant.citations = citations;
             }
             assistant.streaming = false;
             this.emitMessages();

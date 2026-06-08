@@ -13,13 +13,21 @@
  *   SmoothAgentChat.mount({ endpoint: 'wss://…/ws', agentId: '…' });
  */
 import type { ChatWidgetConfig } from './config.js';
-import { defineChatWidget, mountChatWidget, SmoothAgentChatElement } from './element.js';
+import { defineChatWidget, mountChatWidget, mountFullPageChat, SmoothAgentChatElement } from './element.js';
 
 defineChatWidget();
 
-export { defineChatWidget, mountChatWidget, SmoothAgentChatElement };
+export { defineChatWidget, mountChatWidget, mountFullPageChat, SmoothAgentChatElement };
 
-/** Convenience alias matching the global API surface. */
+/** Convenience alias matching the global API surface (`SmoothAgentChat.mount`). */
 export function mount(config: ChatWidgetConfig, target?: HTMLElement): SmoothAgentChatElement {
     return mountChatWidget(config, target);
+}
+
+/**
+ * Full-page convenience alias (`SmoothAgentChat.mountFullPage`): mounts the chat
+ * in `mode: "fullpage"` so it fills its container/viewport with no launcher.
+ */
+export function mountFullPage(config: Omit<ChatWidgetConfig, 'mode'>, target?: HTMLElement): SmoothAgentChatElement {
+    return mountFullPageChat(config, target);
 }

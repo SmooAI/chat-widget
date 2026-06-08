@@ -76,7 +76,65 @@ const widget = mountChatWidget({
 widget.openChat();
 ```
 
-> **Modes:** embeddable launcher + popover today; a full-page / inline mode is on the roadmap.
+> **Modes:** two layouts share the same conversation/transport core — the embeddable **launcher + popover** (default) and a **full-page** layout (`mode="fullpage"`) that fills its container/viewport with a Smooth-branded header, a scrollable message list, and an input bar. See [Full-page mode](#full-page-mode) below.
+
+---
+
+## Full-page mode
+
+For a dedicated support page, a docs-site chat pane, or an iframe embed, run the widget in **full-page mode** — no launcher bubble; the chat fills its container (or the viewport) with a Smooth-branded header (the Smooth logo + a subtle *powered by smooth-operator*), a scrollable message list, and an input bar.
+
+Declaratively, set `mode="fullpage"`:
+
+```html
+<script src="https://unpkg.com/@smooai/chat-widget/dist/chat-widget.global.js"></script>
+
+<!-- Fills its container; size the parent (or it falls back to filling the viewport). -->
+<smooth-agent-chat
+  mode="fullpage"
+  endpoint="wss://realtime.prod.smooth-agent.dev/ws"
+  agent-id="00000000-0000-0000-0000-000000000000"
+  agent-name="Dev Support"
+></smooth-agent-chat>
+```
+
+Or programmatically with the ergonomic helper (forces `mode: "fullpage"`):
+
+```ts
+import { mountFullPageChat } from '@smooai/chat-widget';
+
+mountFullPageChat({
+  endpoint: 'wss://realtime.prod.smooth-agent.dev/ws',
+  agentId: '00000000-0000-0000-0000-000000000000',
+  agentName: 'Dev Support',
+}, document.querySelector('#chat')!); // target defaults to document.body
+```
+
+From the standalone IIFE global, the alias is `SmoothAgentChat.mountFullPage({ … })`.
+
+The **popover** mode is unchanged — it's an alternative layout over the same shared conversation/transport core, so streaming, theming, and the programmatic API all behave identically across modes.
+
+---
+
+## Citations — a Sources panel under grounded answers
+
+When an assistant's terminal `eventual_response` carries **citations** (the sources the agent's RAG retrieval actually used to ground the turn), the widget renders a collapsible **"Sources (N)"** section under that message. This is the dev-support payoff — answers cite the repo files / issues they came from.
+
+Each citation renders its `title` (linked to `citation.url` with `target="_blank" rel="noopener"` when a web location exists — GitHub blob/issue URLs, for example — or as plain text when it doesn't, e.g. an uploaded file or a local doc path) plus the grounding `snippet`.
+
+Citations are read **defensively** off the terminal event (`eventual_response.data.data.citations` — the `@smooai/smooth-operator` client types them as `Citation[]`): the section is skipped entirely when a turn used no sources, and a server (or client) that never emits citations renders exactly as before — fully back-compatible. The shape is:
+
+```ts
+interface Citation {
+  id: string;       // knowledge-base document_id (dedupe key)
+  title: string;    // source path, or URL/title for web-sourced docs
+  url?: string;     // canonical link when one exists (GitHub blob/issue); absent for local docs
+  snippet: string;  // the retrieved chunk that grounded the answer
+  score: number;    // relevance (KB similarity) — higher is more relevant
+}
+```
+
+> Citations render in **both** layouts, but the Sources panel is the centerpiece of the full-page dev-support page.
 
 ---
 
@@ -111,8 +169,9 @@ document.querySelector('#help')?.addEventListener('click', () => widget.openChat
 | `<smooth-agent-chat>` element | Custom element. Configure via HTML attributes (below). |
 | `defineChatWidget()` | Register the custom element (idempotent). |
 | `mountChatWidget(config, target?)` | Create + configure + append the element programmatically; returns it. |
+| `mountFullPageChat(config, target?)` | Same, forcing `mode: "fullpage"` (no launcher; fills its container). `SmoothAgentChat.mountFullPage(…)` from the IIFE global. |
 | `element.configure(partialConfig)` | Merge config overrides (precedence over attributes); re-renders. |
-| `element.openChat()` / `element.closeChat()` | Open / collapse the popover panel. |
+| `element.openChat()` / `element.closeChat()` | Open / collapse the popover panel (no-op in full-page mode). |
 
 ### Attributes
 
@@ -120,16 +179,18 @@ document.querySelector('#help')?.addEventListener('click', () => widget.openChat
 | --- | --- | --- |
 | `endpoint` | `config.endpoint` (WS URL) | ✅ |
 | `agent-id` | `config.agentId` | ✅ |
+| `mode` | `config.mode` — `"popover"` (default) or `"fullpage"` | |
 | `agent-name` | `config.agentName` | |
 | `placeholder` | input placeholder | |
 | `greeting` | opening assistant line | |
-| `start-open` | start with panel open | |
+| `start-open` | start with panel open (popover only) | |
 
 ### Config (`ChatWidgetConfig`)
 
 ```ts
 interface ChatWidgetConfig {
   endpoint: string;   // smooth-operator WS URL
+  mode?: 'popover' | 'fullpage'; // layout — defaults to 'popover'
   agentId: string;    // UUID of the agent
   agentName?: string;
   userName?: string;
@@ -173,18 +234,19 @@ flowchart LR
         ENGINE[smooth-operator-core engine]
     end
 
-    EL --> CTRL
+    EL["&lt;smooth-agent-chat&gt;<br/>popover · fullpage<br/>(shadow-root web component)"] --> CTRL
     CTRL -->|connect / createSession / sendMessage| CLIENT
     CLIENT -->|schema-driven WS protocol| WS
     WS --> ENGINE
     ENGINE -.->|OpenAI-compatible| GW[(LLM gateway)]
+    ENGINE -.->|RAG retrieval| KB[(knowledge base)]
     ENGINE -->|stream_token …| WS
-    WS -->|stream_token / eventual_response| CLIENT
-    CLIENT -->|append tokens| CTRL
-    CTRL -->|render bubble| EL
+    WS -->|stream_token / eventual_response<br/>+ citations| CLIENT
+    CLIENT -->|append tokens · Citation[]| CTRL
+    CTRL -->|render bubble + Sources panel| EL
 ```
 
-**On open**, the widget calls `client.connect()` then `createConversationSession({ agentId })`. **On send**, it calls `sendMessage({ sessionId, message })`, which returns a streaming `MessageTurn`; the widget async-iterates the turn, appending each `stream_token` to the in-progress assistant bubble, then awaits the terminal `eventual_response` for the authoritative final text. The protocol shapes are identical to `@smooai/realtime` — this is a client-library swap, not a protocol redesign.
+**On open**, the widget calls `client.connect()` then `createConversationSession({ agentId })`. **On send**, it calls `sendMessage({ sessionId, message })`, which returns a streaming `MessageTurn`; the widget async-iterates the turn, appending each `stream_token` to the in-progress assistant bubble, then awaits the terminal `eventual_response` for the authoritative final text **and any `citations`** — which it renders as a **Sources** panel under the answer. Both the popover and full-page layouts share this one `ConversationController` + transport core. The protocol shapes are identical to `@smooai/realtime` — this is a client-library swap, not a protocol redesign.
 
 ---
 
@@ -197,6 +259,8 @@ The widget's credibility test is the one that matters most for a chat UI: **does
 > *"SmooAI's return window is exactly 17 days from delivery."*
 
 — loads the **built** `<smooth-agent-chat>` widget in Chromium, types *"What is SmooAI's return window?"*, and asserts the streamed assistant bubble contains **`17`**. A grounded answer can't pass unless the full path works: shadow-DOM render → WS connect → session create → message send → token stream → RAG retrieval → final text.
+
+A second spec — `e2e/fullpage.live.spec.ts` — exercises the **full-page layout + citations**: it loads `mode="fullpage"`, asserts there's no launcher, the Smooth logo header renders, the grounded `17` answer streams in, **and** the **Sources** panel renders for the citation the seeded doc grounded. (Honest note: the built-in seed sources its docs from a path — `policies/returns.md` — not an `http(s)` URL, so `citation.url` is absent and the source renders as plain text rather than a link; the test asserts the Sources section + title accordingly and reports the link count.)
 
 ```mermaid
 flowchart TD

@@ -13,14 +13,15 @@
  *   <smooth-agent-chat endpoint="ws://localhost:8787/ws" agent-id="…"></smooth-agent-chat>
  * or programmatically via {@link mountChatWidget}.
  */
-import type { ChatWidgetConfig, ChatWidgetTheme } from './config.js';
+import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { resolveConfig } from './config.js';
-import { ConversationController, type ChatMessage, type ConnectionStatus } from './conversation.js';
+import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController } from './conversation.js';
+import { SMOOTH_LOGO_SVG } from './logo.js';
 import { buildStyles } from './styles.js';
 
 export const ELEMENT_TAG = 'smooth-agent-chat';
 
-const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'placeholder', 'greeting', 'start-open'] as const;
+const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'placeholder', 'greeting', 'start-open', 'mode'] as const;
 
 export class SmoothAgentChatElement extends HTMLElement {
     static get observedAttributes(): readonly string[] {
@@ -96,8 +97,11 @@ export class SmoothAgentChatElement extends HTMLElement {
         if (!endpoint || !agentId) return null;
 
         const theme: ChatWidgetTheme | undefined = this.overrides.theme;
+        const modeAttr = this.getAttribute('mode');
+        const mode: ChatWidgetMode = this.overrides.mode ?? (modeAttr === 'fullpage' ? 'fullpage' : modeAttr === 'popover' ? 'popover' : undefined) ?? 'popover';
         return {
             endpoint,
+            mode,
             agentId,
             agentName: this.overrides.agentName ?? this.getAttribute('agent-name') ?? undefined,
             userName: this.overrides.userName,
@@ -137,19 +141,41 @@ export class SmoothAgentChatElement extends HTMLElement {
             if (resolved.startOpen) this.open = true;
         }
 
-        const style = document.createElement('style');
-        style.textContent = buildStyles(resolved.theme);
+        const fullpage = resolved.mode === 'fullpage';
+        // Full-page mode is always "open" — it fills its container and has no
+        // launcher to toggle.
+        if (fullpage) this.open = true;
 
-        const container = document.createElement('div');
-        container.innerHTML = `
-            <button class="launcher" part="launcher" aria-label="Open chat">💬</button>
-            <div class="panel hidden" part="panel" role="dialog" aria-label="${resolved.agentName} chat">
-                <div class="header">
+        const style = document.createElement('style');
+        style.textContent = buildStyles(resolved.theme, resolved.mode);
+
+        // Header: in full-page mode lead with the Smooth logo (falls back to the
+        // agent name) + a subtle "powered by smooth-operator"; in popover mode the
+        // compact agent-name title we've always shown. The close button only
+        // exists in popover mode (full-page has nothing to collapse to).
+        const headerBrand = fullpage
+            ? `<div class="brand">
+                    <span class="logo-wrap">${SMOOTH_LOGO_SVG}</span>
                     <div>
                         <div class="title">${escapeHtml(resolved.agentName)}</div>
                         <div class="status"></div>
                     </div>
-                    <button class="close" aria-label="Close chat">×</button>
+                </div>
+                <div class="powered">powered by smooth-operator</div>`
+            : `<div class="brand">
+                    <div>
+                        <div class="title">${escapeHtml(resolved.agentName)}</div>
+                        <div class="status"></div>
+                    </div>
+                </div>
+                <button class="close" aria-label="Close chat">×</button>`;
+
+        const container = document.createElement('div');
+        container.innerHTML = `
+            ${fullpage ? '' : '<button class="launcher" part="launcher" aria-label="Open chat">💬</button>'}
+            <div class="panel${fullpage ? ' fullpage' : ' hidden'}" part="panel" role="${fullpage ? 'region' : 'dialog'}" aria-label="${escapeHtml(resolved.agentName)} chat">
+                <div class="header">
+                    ${headerBrand}
                 </div>
                 <div class="messages"></div>
                 <div class="composer">
@@ -158,6 +184,10 @@ export class SmoothAgentChatElement extends HTMLElement {
                 </div>
             </div>
         `;
+
+        // Tag the logo <svg> so styles can size it (the inlined SVG has its own id).
+        const logoSvg = container.querySelector('.logo-wrap svg');
+        if (logoSvg) logoSvg.setAttribute('class', 'logo');
 
         this.root.replaceChildren(style, container);
 
@@ -178,6 +208,9 @@ export class SmoothAgentChatElement extends HTMLElement {
             }
         });
 
+        // Full-page mode connects eagerly (there's no launcher click to trigger it).
+        if (fullpage) void this.controller?.connect().catch(() => {});
+
         this.syncOpenState();
         this.renderMessages(resolved.greeting);
         this.renderStatus();
@@ -185,6 +218,11 @@ export class SmoothAgentChatElement extends HTMLElement {
     }
 
     private syncOpenState(): void {
+        // In full-page mode the panel always fills the host; nothing to toggle.
+        if (this.panelEl?.classList.contains('fullpage')) {
+            this.inputEl?.focus();
+            return;
+        }
         this.panelEl?.classList.toggle('hidden', !this.open);
         this.launcherEl?.classList.toggle('hidden', this.open);
         if (this.open) this.inputEl?.focus();
@@ -213,8 +251,66 @@ export class SmoothAgentChatElement extends HTMLElement {
                 el.textContent = msg.text;
             }
             this.messagesEl.appendChild(el);
+
+            // Render a "Sources (N)" section under any assistant message whose
+            // terminal eventual_response carried citations. Back-compatible: most
+            // turns have none, so this is skipped.
+            if (msg.role === 'assistant' && !msg.streaming && msg.citations && msg.citations.length > 0) {
+                this.messagesEl.appendChild(this.renderSources(msg.citations));
+            }
         }
         this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    }
+
+    /**
+     * Build the collapsible "Sources (N)" block for an assistant message's
+     * citations. Each source renders its `title` (linked to `citation.url` when
+     * present — `target=_blank rel=noopener` — plain text otherwise) plus the
+     * grounding `snippet`. Built with DOM APIs (not innerHTML) so citation text
+     * can't inject markup.
+     */
+    private renderSources(citations: Citation[]): HTMLElement {
+        const wrap = document.createElement('div');
+        wrap.className = 'sources';
+        wrap.setAttribute('part', 'sources');
+
+        const details = document.createElement('details');
+        details.open = true;
+
+        const summary = document.createElement('summary');
+        summary.textContent = `Sources (${citations.length})`;
+        details.appendChild(summary);
+
+        const list = document.createElement('ol');
+        for (const c of citations) {
+            const li = document.createElement('li');
+
+            let titleEl: HTMLElement;
+            if (c.url) {
+                const a = document.createElement('a');
+                a.className = 'src-title';
+                a.href = c.url;
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+                titleEl = a;
+            } else {
+                titleEl = document.createElement('span');
+                titleEl.className = 'src-title';
+            }
+            titleEl.textContent = c.title || c.id || 'Source';
+            li.appendChild(titleEl);
+
+            if (c.snippet) {
+                const snip = document.createElement('span');
+                snip.className = 'src-snippet';
+                snip.textContent = c.snippet;
+                li.appendChild(snip);
+            }
+            list.appendChild(li);
+        }
+        details.appendChild(list);
+        wrap.appendChild(details);
+        return wrap;
     }
 
     private renderStatus(): void {
@@ -278,4 +374,22 @@ export function mountChatWidget(config: ChatWidgetConfig, target: HTMLElement = 
     el.configure(config);
     target.appendChild(el);
     return el;
+}
+
+/**
+ * Ergonomic helper for the full-page layout: mounts a `<smooth-agent-chat>` in
+ * `mode: "fullpage"` (no launcher — the chat fills its container/viewport with a
+ * Smooth-branded header, a scrollable message list, and an input bar) and
+ * returns the element.
+ *
+ * `target` defaults to `document.body`; pass a sized container to embed the
+ * full-page chat inside a layout region (e.g. a `/chat` route shell or an
+ * iframe). The `mode` is forced to `"fullpage"` regardless of the passed config.
+ *
+ * ```ts
+ * mountFullPageChat({ endpoint: 'wss://…/ws', agentId: '…', agentName: 'Support' });
+ * ```
+ */
+export function mountFullPageChat(config: Omit<ChatWidgetConfig, 'mode'>, target: HTMLElement = document.body): SmoothAgentChatElement {
+    return mountChatWidget({ ...config, mode: 'fullpage' }, target);
 }
