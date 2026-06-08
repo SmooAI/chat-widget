@@ -1,6 +1,6 @@
 /**
  * Live e2e (Onyx-gap G5): load the built `<smooth-agent-chat>` widget in a real
- * browser, point it at a locally-spawned `smooth-operator-agent-server`, send a
+ * browser, point it at a locally-spawned `smooth-operator-server`, send a
  * message, and assert the streamed, knowledge-grounded reply renders.
  *
  * The server seeds a distinctive KB doc on startup (SMOOTH_AGENT_SEED_KB=1):
@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 
 const AGENT_PORT = 8830;
-const SERVER_BIN = join(homedir(), '.cargo', 'shared-target', 'debug', 'smooth-operator-agent-server');
+const SERVER_BIN = join(homedir(), '.cargo', 'shared-target', 'debug', 'smooth-operator-server');
 
 const GATEWAY_KEY = process.env.SMOOAI_GATEWAY_KEY ?? '';
 const E2E_ENABLED = process.env.SMOOTH_AGENT_E2E === '1' && GATEWAY_KEY.length > 0;
@@ -54,8 +54,8 @@ test.beforeAll(async () => {
 
     if (!existsSync(SERVER_BIN)) {
         throw new Error(
-            `smooth-operator-agent-server binary not found at ${SERVER_BIN}. ` +
-                'Build it with: cargo build -p smooai-smooth-operator-agent-server --bin smooth-operator-agent-server',
+            `smooth-operator-server binary not found at ${SERVER_BIN}. ` +
+                'Build it with: cargo build -p smooai-smooth-operator-server --bin smooth-operator-server',
         );
     }
 

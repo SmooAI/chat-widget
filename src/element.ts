@@ -7,7 +7,7 @@
  * Supabase auth …). This is a clean, dependency-light rewrite that preserves the
  * embedding model — a custom element with a launcher + popover panel, declarative
  * HTML attributes, and a programmatic API — while talking to the
- * `@smooai/smooth-operator-agent` protocol client instead of `@smooai/realtime`.
+ * `@smooai/smooth-operator` protocol client instead of `@smooai/realtime`.
  *
  * Embedding model:
  *   <smooth-agent-chat endpoint="ws://localhost:8787/ws" agent-id="…"></smooth-agent-chat>

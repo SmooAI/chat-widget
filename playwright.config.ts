@@ -8,7 +8,7 @@ import { defineConfig, devices } from '@playwright/test';
  * block boots the dependency-free node static server (e2e/static-server.mjs)
  * that serves the repo root, so the demo page can load the built IIFE bundle.
  *
- * The smooth-operator-agent-server itself is spawned from inside the spec
+ * The smooth-operator-server itself is spawned from inside the spec
  * (e2e/widget.live.spec.ts) so its lifecycle is gated on the same env guards
  * (SMOOTH_AGENT_E2E + SMOOAI_GATEWAY_KEY) that skip the test.
  */

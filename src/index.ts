@@ -1,7 +1,7 @@
 /**
- * @smooai/chat-widget — an embeddable chat widget for the smooth-operator-agent
+ * @smooai/chat-widget — an embeddable chat widget for the smooth-operator
  * protocol. Framework-light web component that speaks the schema-driven WebSocket
- * protocol via `@smooai/smooth-operator-agent`.
+ * protocol via `@smooai/smooth-operator`.
  *
  * ESM library entry. For bundler-based hosts:
  *

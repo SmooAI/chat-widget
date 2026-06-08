@@ -1,19 +1,19 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsdown';
 
-// Alias the smooth-operator-agent package's compiled client entry for bundling, so
+// Alias the smooth-operator package's compiled client entry for bundling, so
 // rolldown follows only the browser-clean client graph (transport + types) and
 // never pulls in the package's `validate.js` (which statically imports ajv +
 // node:fs/url/path for the Node-only `ProtocolValidator` the widget doesn't use).
 // The package's `exports` only exposes `.`, so we point at the on-disk file.
 const agentClientEntry = fileURLToPath(
-    new URL('./node_modules/@smooai/smooth-operator-agent/dist/client.js', import.meta.url),
+    new URL('./node_modules/@smooai/smooth-operator/dist/client.js', import.meta.url),
 );
 
 export default defineConfig([
     // ESM library entry — for bundler-based hosts that `import` the widget and
     // call `defineChatWidget()` / `mountChatWidget(...)` programmatically. The
-    // smooth-operator-agent client is kept external so the host dedupes it.
+    // smooth-operator client is kept external so the host dedupes it.
     {
         entry: { index: 'src/index.ts' },
         format: ['esm'],
@@ -32,9 +32,9 @@ export default defineConfig([
         format: ['iife'],
         platform: 'browser',
         globalName: 'SmoothAgentChat',
-        deps: { alwaysBundle: [/@smooai\/smooth-operator-agent/] },
+        deps: { alwaysBundle: [/@smooai\/smooth-operator/] },
         alias: {
-            '@smooai/smooth-operator-agent': agentClientEntry,
+            '@smooai/smooth-operator': agentClientEntry,
         },
         dts: false,
         sourcemap: true,

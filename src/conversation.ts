@@ -1,6 +1,6 @@
 /**
  * ConversationController — the bridge between the widget UI and the
- * `@smooai/smooth-operator-agent` protocol client.
+ * `@smooai/smooth-operator` protocol client.
  *
  * This is the piece that was rewired: the original smooai widget spoke to
  * `@smooai/realtime`; here every protocol action goes through {@link SmoothAgentClient}.
@@ -15,7 +15,7 @@
  *
  * The controller is UI-agnostic: it emits typed events and the view renders them.
  */
-import { ProtocolError, SmoothAgentClient } from '@smooai/smooth-operator-agent';
+import { ProtocolError, SmoothAgentClient } from '@smooai/smooth-operator';
 import type { ChatWidgetConfig } from './config.js';
 
 export type Role = 'user' | 'assistant';

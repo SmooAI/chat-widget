@@ -28,7 +28,7 @@ export interface ChatWidgetTheme {
 
 export interface ChatWidgetConfig {
     /**
-     * smooth-operator-agent WebSocket endpoint, e.g.
+     * smooth-operator WebSocket endpoint, e.g.
      * `wss://realtime.prod.smooth-agent.dev` or `ws://localhost:8787/ws`.
      */
     endpoint: string;

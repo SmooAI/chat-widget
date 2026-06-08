@@ -1,7 +1,7 @@
 {
     "name": "@smooai/chat-widget",
     "version": "0.1.0",
-    "description": "Embeddable chat widget for smooth-operator-agent — a framework-light web component that speaks the schema-driven WebSocket protocol. Built with tsdown.",
+    "description": "Embeddable chat widget for smooth-operator — a framework-light web component that speaks the schema-driven WebSocket protocol. Built with tsdown.",
     "license": "MIT",
     "type": "module",
     "engines": {
@@ -29,7 +29,7 @@
         "test:e2e": "playwright test --project=chromium"
     },
     "dependencies": {
-        "@smooai/smooth-operator-agent": "file:../smooth-operator-agent/typescript"
+        "@smooai/smooth-operator": "file:../smooth-operator/typescript"
     },
     "devDependencies": {
         "@playwright/test": "^1.49.0",

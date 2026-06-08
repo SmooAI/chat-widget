@@ -9,9 +9,9 @@ importers:
 
   .:
     dependencies:
-      '@smooai/smooth-operator-agent':
-        specifier: file:../smooth-operator-agent/typescript
-        version: file:../smooth-operator-agent/typescript
+      '@smooai/smooth-operator':
+        specifier: file:../smooth-operator/typescript
+        version: file:../smooth-operator/typescript
     devDependencies:
       '@playwright/test':
         specifier: ^1.49.0
@@ -180,8 +180,8 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@smooai/smooth-operator-agent@file:../smooth-operator-agent/typescript':
-    resolution: {directory: ../smooth-operator-agent/typescript, type: directory}
+  '@smooai/smooth-operator@file:../smooth-operator/typescript':
+    resolution: {directory: ../smooth-operator/typescript, type: directory}
     engines: {node: '>=22'}
 
   '@tybys/wasm-util@0.10.2':
@@ -498,7 +498,7 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@smooai/smooth-operator-agent@file:../smooth-operator-agent/typescript': {}
+  '@smooai/smooth-operator@file:../smooth-operator/typescript': {}
 
   '@tybys/wasm-util@0.10.2':
     dependencies:
