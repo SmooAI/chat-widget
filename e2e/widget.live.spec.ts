@@ -1,5 +1,5 @@
 /**
- * Live e2e (Onyx-gap G5): load the built `<smooth-agent-chat>` widget in a real
+ * Live e2e (feature gap G5): load the built `<smooth-agent-chat>` widget in a real
  * browser, point it at a locally-spawned `smooth-operator-server`, send a
  * message, and assert the streamed, knowledge-grounded reply renders.
  *
