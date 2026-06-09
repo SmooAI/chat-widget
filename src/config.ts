@@ -39,7 +39,7 @@ export type ChatWidgetMode = 'popover' | 'fullpage';
 export interface ChatWidgetConfig {
     /**
      * smooth-operator WebSocket endpoint, e.g.
-     * `wss://realtime.prod.smooth-agent.dev` or `ws://localhost:8787/ws`.
+     * `ws://localhost:8787/ws` (local dev) or your deployed `wss://…/ws` URL.
      */
     endpoint: string;
     /**

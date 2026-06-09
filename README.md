@@ -27,13 +27,20 @@ It's a plain `HTMLElement` rendering into a shadow root — **no React, no Tailw
 
 The fastest path — a plain `<script>` tag and one element:
 
+> **Publish pending.** `@smooai/chat-widget` isn't on npm/unpkg yet, so the
+> `unpkg.com` and `pnpm add` lines below won't resolve from the public registry
+> today. Until the release lands, build the bundle from a local checkout
+> (`pnpm install && pnpm build`, then serve `dist/chat-widget.global.js` yourself)
+> or depend on it via a workspace / `file:` path. The snippets below are the
+> shape they'll take once published.
+
 ```html
 <!-- 1. Load the standalone bundle (auto-registers the custom element). -->
 <script src="https://unpkg.com/@smooai/chat-widget/dist/chat-widget.global.js"></script>
 
 <!-- 2. Drop the element. Point it at your smooth-operator WS endpoint + agent id. -->
 <smooth-agent-chat
-  endpoint="wss://realtime.prod.smooth-agent.dev/ws"
+  endpoint="ws://localhost:8787/ws"
   agent-id="00000000-0000-0000-0000-000000000000"
   agent-name="Support"
 ></smooth-agent-chat>
@@ -48,7 +55,7 @@ Prefer to mount it from JS?
 <script>
   // The IIFE global exposes both `mount` (convenience alias) and `mountChatWidget`.
   SmoothAgentChat.mount({
-    endpoint: 'wss://realtime.prod.smooth-agent.dev/ws',
+    endpoint: 'ws://localhost:8787/ws',
     agentId: '00000000-0000-0000-0000-000000000000',
     agentName: 'Support',
     theme: { primary: '#7c3aed' },
@@ -59,7 +66,7 @@ Prefer to mount it from JS?
 Or, in a bundler-based app:
 
 ```bash
-pnpm add @smooai/chat-widget
+pnpm add @smooai/chat-widget   # npm publish pending — use a workspace / file: dep today
 ```
 
 ```ts
@@ -70,7 +77,7 @@ defineChatWidget();
 
 // Or programmatic — create, configure, and append in one call:
 const widget = mountChatWidget({
-  endpoint: 'wss://realtime.prod.smooth-agent.dev/ws',
+  endpoint: 'ws://localhost:8787/ws',
   agentId: '00000000-0000-0000-0000-000000000000',
 });
 widget.openChat();
@@ -92,7 +99,7 @@ Declaratively, set `mode="fullpage"`:
 <!-- Fills its container; size the parent (or it falls back to filling the viewport). -->
 <smooth-agent-chat
   mode="fullpage"
-  endpoint="wss://realtime.prod.smooth-agent.dev/ws"
+  endpoint="ws://localhost:8787/ws"
   agent-id="00000000-0000-0000-0000-000000000000"
   agent-name="Dev Support"
 ></smooth-agent-chat>
@@ -104,7 +111,7 @@ Or programmatically with the ergonomic helper (forces `mode: "fullpage"`):
 import { mountFullPageChat } from '@smooai/chat-widget';
 
 mountFullPageChat({
-  endpoint: 'wss://realtime.prod.smooth-agent.dev/ws',
+  endpoint: 'ws://localhost:8787/ws',
   agentId: '00000000-0000-0000-0000-000000000000',
   agentName: 'Dev Support',
 }, document.querySelector('#chat')!); // target defaults to document.body
@@ -146,7 +153,7 @@ The element is a real `HTMLElement` — give it a ref and drive it:
 import { mountChatWidget, type ChatWidgetConfig } from '@smooai/chat-widget';
 
 const widget = mountChatWidget({
-  endpoint: 'wss://realtime.prod.smooth-agent.dev/ws',
+  endpoint: 'ws://localhost:8787/ws',
   agentId: '00000000-0000-0000-0000-000000000000',
   agentName: 'Aria',
   greeting: 'Hi! Ask me anything about our return policy.',
