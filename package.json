@@ -29,7 +29,7 @@
         "test:e2e": "playwright test --project=chromium"
     },
     "dependencies": {
-        "@smooai/smooth-operator": "file:../smooth-operator/typescript"
+        "@smooai/smooth-operator": "^0.1.0"
     },
     "devDependencies": {
         "@playwright/test": "^1.49.0",
