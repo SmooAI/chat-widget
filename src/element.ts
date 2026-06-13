@@ -15,7 +15,7 @@
  * or programmatically via {@link mountChatWidget}.
  */
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
-import { resolveConfig } from './config.js';
+import { needsUserInfo, resolveConfig } from './config.js';
 import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController } from './conversation.js';
 import { SMOOTH_LOGO_SVG } from './logo.js';
 import { buildStyles } from './styles.js';
@@ -72,6 +72,12 @@ export class SmoothAgentChatElement extends HTMLElement {
     private messages: ChatMessage[] = [];
     private status: ConnectionStatus = 'idle';
     private mounted = false;
+    /** True once the visitor has cleared the pre-chat identity gate (or it's not needed). */
+    private userInfoSatisfied = false;
+    /** True after the visitor has sent their first message (hides starter chips). */
+    private hasSent = false;
+    /** Starter prompts shown as chips in the empty state. */
+    private examplePrompts: string[] = [];
 
     // Cached DOM refs (populated in render()).
     private panelEl: HTMLElement | null = null;
@@ -144,10 +150,16 @@ export class SmoothAgentChatElement extends HTMLElement {
             agentName: this.overrides.agentName ?? this.getAttribute('agent-name') ?? undefined,
             userName: this.overrides.userName,
             userEmail: this.overrides.userEmail,
+            userPhone: this.overrides.userPhone,
             placeholder: this.overrides.placeholder ?? this.getAttribute('placeholder') ?? undefined,
             greeting: this.overrides.greeting ?? this.getAttribute('greeting') ?? undefined,
             connectionErrorMessage: this.overrides.connectionErrorMessage,
             startOpen: this.overrides.startOpen ?? this.hasAttribute('start-open'),
+            examplePrompts: this.overrides.examplePrompts,
+            requireName: this.overrides.requireName,
+            requireEmail: this.overrides.requireEmail,
+            requirePhone: this.overrides.requirePhone,
+            allowAnonymous: this.overrides.allowAnonymous,
             theme,
         };
     }
@@ -209,12 +221,27 @@ export class SmoothAgentChatElement extends HTMLElement {
                     <button class="close" aria-label="Close chat">${ICON.close}</button>
                 </div>`;
 
-        const container = document.createElement('div');
-        container.innerHTML = `
-            ${fullpage ? '' : `<button class="launcher" part="launcher" aria-label="Open chat">${ICON.spark}</button>`}
-            <div class="panel${fullpage ? ' fullpage' : ' hidden'}" part="panel" role="${fullpage ? 'region' : 'dialog'}" aria-label="${escapeHtml(resolved.agentName)} chat">
-                ${header}
-                <div class="header-sep"></div>
+        // Remember starter prompts for the empty-state chips.
+        this.examplePrompts = resolved.examplePrompts;
+
+        // Gate the conversation behind a pre-chat identity form when required.
+        const gating = needsUserInfo(resolved) && !this.userInfoSatisfied;
+        const field = (name: string, type: string, label: string, autocomplete: string) =>
+            `<label class="pc-field"><span>${escapeHtml(label)}</span><input name="${name}" type="${type}" autocomplete="${autocomplete}" required /></label>`;
+        const prechatHtml = `
+            <div class="prechat">
+                <div class="pc-head">
+                    <div class="pc-title">Before we chat</div>
+                    <div class="pc-sub">A couple details so ${escapeHtml(resolved.agentName)} can help.</div>
+                </div>
+                <form class="pc-form" novalidate>
+                    ${resolved.requireName ? field('name', 'text', 'Name', 'name') : ''}
+                    ${resolved.requireEmail ? field('email', 'email', 'Email', 'email') : ''}
+                    ${resolved.requirePhone ? field('phone', 'tel', 'Phone', 'tel') : ''}
+                    <button type="submit" class="pc-submit">Start chat</button>
+                </form>
+            </div>`;
+        const chatHtml = `
                 <div class="messages"></div>
                 <div class="composer-wrap">
                     <div class="composer">
@@ -222,7 +249,15 @@ export class SmoothAgentChatElement extends HTMLElement {
                         <button class="send" type="button" aria-label="Send message">${ICON.send}</button>
                     </div>
                     <div class="footer">powered by <b>smooth&#8209;operator</b></div>
-                </div>
+                </div>`;
+
+        const container = document.createElement('div');
+        container.innerHTML = `
+            ${fullpage ? '' : `<button class="launcher" part="launcher" aria-label="Open chat">${ICON.spark}</button>`}
+            <div class="panel${fullpage ? ' fullpage' : ' hidden'}" part="panel" role="${fullpage ? 'region' : 'dialog'}" aria-label="${escapeHtml(resolved.agentName)} chat">
+                ${header}
+                <div class="header-sep"></div>
+                ${gating ? prechatHtml : chatHtml}
             </div>
         `;
 
@@ -251,13 +286,38 @@ export class SmoothAgentChatElement extends HTMLElement {
             }
         });
 
-        // Full-page mode connects eagerly (there's no launcher click to trigger it).
-        if (fullpage) void this.controller?.connect().catch(() => {});
+        const pcForm = container.querySelector('.pc-form');
+        pcForm?.addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            this.handlePrechatSubmit(pcForm as HTMLFormElement);
+        });
+
+        // Full-page mode connects eagerly (there's no launcher click to trigger it) —
+        // but only once any identity gate is cleared.
+        if (fullpage && !gating) void this.controller?.connect().catch(() => {});
 
         this.syncOpenState();
-        this.renderMessages(resolved.greeting);
+        if (!gating) this.renderMessages(resolved.greeting);
         this.renderStatus();
         this.renderComposerState();
+    }
+
+    /** Collect identity from the pre-chat form, then drop into the chat view. */
+    private handlePrechatSubmit(form: HTMLFormElement): void {
+        if (!form.reportValidity()) return;
+        const data = new FormData(form);
+        const val = (k: string) => ((data.get(k) as string | null)?.trim() || undefined);
+        this.controller?.setUserInfo({ name: val('name'), email: val('email'), phone: val('phone') });
+        this.userInfoSatisfied = true;
+        this.render();
+        void this.controller?.connect().catch(() => {});
+    }
+
+    /** Send a starter prompt (from a chip click). */
+    private submitPrompt(text: string): void {
+        if (!this.inputEl) return;
+        this.inputEl.value = text;
+        this.submit();
     }
 
     private syncOpenState(): void {
@@ -285,6 +345,21 @@ export class SmoothAgentChatElement extends HTMLElement {
 
         if (this.messages.length === 0 && greeting) {
             this.messagesEl.appendChild(this.buildRow('assistant', this.greetingBubble(greeting)));
+        }
+
+        // Starter-prompt chips: shown until the visitor sends their first message.
+        if (!this.hasSent && this.messages.length === 0 && this.examplePrompts.length > 0) {
+            const chips = document.createElement('div');
+            chips.className = 'prompts';
+            for (const prompt of this.examplePrompts) {
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                chip.className = 'chip';
+                chip.textContent = prompt;
+                chip.addEventListener('click', () => this.submitPrompt(prompt));
+                chips.appendChild(chip);
+            }
+            this.messagesEl.appendChild(chips);
         }
 
         for (const msg of this.messages) {
@@ -427,6 +502,7 @@ export class SmoothAgentChatElement extends HTMLElement {
         const text = this.inputEl.value;
         if (!text.trim()) return;
         this.inputEl.value = '';
+        this.hasSent = true;
         this.autosize();
         void this.controller.send(text);
     }

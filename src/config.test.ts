@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveConfig } from './config.js';
+import { needsUserInfo, resolveConfig } from './config.js';
 
 const base = { endpoint: 'wss://example/ws', agentId: 'agent-1' };
 
@@ -44,5 +44,46 @@ describe('resolveConfig', () => {
         expect(r.greeting).toBe('Hey!');
         expect(r.placeholder).toBe('Ask…');
         expect(r.startOpen).toBe(true);
+    });
+
+    it('folds the dashboard chatBubble* aliases into the canonical theme keys', () => {
+        const r = resolveConfig({
+            ...base,
+            theme: {
+                chatBubbleInbound: '#111111',
+                chatBubbleInboundText: '#222222',
+                chatBubbleOutbound: '#333333',
+                chatBubbleOutboundText: '#444444',
+            },
+        });
+        expect(r.theme.assistantBubble).toBe('#111111');
+        expect(r.theme.assistantBubbleText).toBe('#222222');
+        expect(r.theme.userBubble).toBe('#333333');
+        expect(r.theme.userBubbleText).toBe('#444444');
+        // Aliases don't leak into the resolved theme shape.
+        expect((r.theme as Record<string, unknown>).chatBubbleInbound).toBeUndefined();
+    });
+
+    it('caps example prompts at 5 and drops blanks', () => {
+        const r = resolveConfig({ ...base, examplePrompts: ['a', '  ', 'b', 'c', 'd', 'e', 'f'] });
+        expect(r.examplePrompts).toEqual(['a', 'b', 'c', 'd', 'e']);
+    });
+});
+
+describe('needsUserInfo', () => {
+    const resolve = (extra: Partial<Parameters<typeof resolveConfig>[0]>) => resolveConfig({ ...base, ...extra });
+
+    it('is false by default (no requirements)', () => {
+        expect(needsUserInfo(resolve({}))).toBe(false);
+    });
+
+    it('is true when any field is required', () => {
+        expect(needsUserInfo(resolve({ requireEmail: true }))).toBe(true);
+        expect(needsUserInfo(resolve({ requireName: true }))).toBe(true);
+        expect(needsUserInfo(resolve({ requirePhone: true }))).toBe(true);
+    });
+
+    it('is false when anonymous chat is allowed, even with requirements set', () => {
+        expect(needsUserInfo(resolve({ requireName: true, requireEmail: true, allowAnonymous: true }))).toBe(false);
     });
 });

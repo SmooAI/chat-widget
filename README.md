@@ -132,6 +132,36 @@ Two further tokens — a darker `primary-2` (gradient depth) and a `surface-2`
 inset wash — are **derived in CSS** from `primary`/`text`, so you never have to
 supply them and they adapt automatically to light or dark themes.
 
+> **Dashboard parity:** the theme also accepts the SmooAI agent dashboard's
+> 10-color model — `secondary` plus `chatBubbleInbound` / `chatBubbleInboundText`
+> / `chatBubbleOutbound` / `chatBubbleOutboundText` (aliases that win over the
+> canonical keys) — so a config exported from the dashboard themes the widget
+> directly.
+
+## Visitor identity & starter prompts
+
+```ts
+mountChatWidget({
+    endpoint, agentId,
+    examplePrompts: ['How do I get started?', 'Do you integrate with HubSpot?'],
+    requireName: true,
+    requireEmail: true,   // gate the chat behind a pre-chat form…
+    // allowAnonymous: true, // …or let visitors skip it entirely
+});
+```
+
+- **`examplePrompts`** render as clickable chips in the empty state (max 5).
+- **`requireName` / `requireEmail` / `requirePhone`** show a styled pre-chat form;
+  the collected name/email are attached to the conversation session (phone rides
+  session metadata). Set **`allowAnonymous: true`** to skip the form.
+
+### OTP & tool confirmation (programmatic)
+
+The `ConversationController` surfaces mid-turn pauses via an `onInterrupt`
+callback — `otp_verification_required` and `write_confirmation_required` — and
+resumes them with `verifyOtp(code)` / `confirmTool(approved)`. (A built-in dialog
+UI for these is on the roadmap; the protocol plumbing ships today.)
+
 ## Full-page mode
 
 Render the chat as a full-bleed surface (a `/chat` route, a docs sidebar, an

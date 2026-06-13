@@ -15,7 +15,7 @@
  *
  * The controller is UI-agnostic: it emits typed events and the view renders them.
  */
-import { type Citation, ProtocolError, SmoothAgentClient } from '@smooai/smooth-operator';
+import { type Citation, ProtocolError, type ServerEvent, SmoothAgentClient } from '@smooai/smooth-operator';
 import type { ChatWidgetConfig } from './config.js';
 
 export type { Citation };
@@ -40,11 +40,41 @@ export interface ChatMessage {
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'ready' | 'error' | 'closed';
 
+/**
+ * A mid-turn pause that needs the visitor to act before the agent can continue:
+ *
+ * - `otp` — the agent requested OTP verification before an authenticated action.
+ *   Resume with {@link ConversationController.verifyOtp}.
+ * - `confirm` — the agent wants to run a state-mutating tool and needs approval.
+ *   Resume with {@link ConversationController.confirmTool}.
+ */
+export type Interrupt =
+    | {
+          kind: 'otp';
+          toolId?: string;
+          actionDescription?: string;
+          availableChannels: ('email' | 'sms')[];
+          /** Set once the server confirms an OTP was dispatched. */
+          sent?: { channel?: string; maskedDestination?: string };
+          /** Set when a submitted code was rejected. */
+          error?: string;
+          attemptsRemaining?: number;
+      }
+    | { kind: 'confirm'; toolId?: string; actionDescription?: string };
+
+export interface UserInfo {
+    name?: string;
+    email?: string;
+    phone?: string;
+}
+
 export interface ConversationEvents {
     /** Fired whenever the message list changes (append, token delta, finalize). */
     onMessages: (messages: ChatMessage[]) => void;
     /** Fired on connection-status transitions. */
     onStatus: (status: ConnectionStatus, detail?: string) => void;
+    /** Fired when a turn pauses for OTP / tool-confirmation, and `null` when it clears. */
+    onInterrupt?: (interrupt: Interrupt | null) => void;
 }
 
 /** Pull the final assistant text out of an `eventual_response` data payload. */
@@ -93,14 +123,43 @@ export class ConversationController {
     private readonly messages: ChatMessage[] = [];
     private status: ConnectionStatus = 'idle';
     private seq = 0;
+    /** Visitor identity, seeded from config and updated by the pre-chat form. */
+    private identity: UserInfo;
+    /** requestId of the in-flight turn — used to resume OTP / tool confirmations. */
+    private activeRequestId: string | null = null;
+    private interrupt: Interrupt | null = null;
 
     constructor(config: ChatWidgetConfig, events: ConversationEvents) {
         this.config = config;
         this.events = events;
+        this.identity = { name: config.userName, email: config.userEmail, phone: config.userPhone };
     }
 
     get connectionStatus(): ConnectionStatus {
         return this.status;
+    }
+
+    /** Merge in visitor identity (from the pre-chat form). Applied on next connect. */
+    setUserInfo(info: UserInfo): void {
+        this.identity = { ...this.identity, ...info };
+    }
+
+    private setInterrupt(interrupt: Interrupt | null): void {
+        this.interrupt = interrupt;
+        this.events.onInterrupt?.(interrupt);
+    }
+
+    /** Submit an OTP code to resume the paused turn. No-op if not awaiting OTP. */
+    verifyOtp(code: string): void {
+        if (!this.client || !this.sessionId || !this.activeRequestId || this.interrupt?.kind !== 'otp') return;
+        this.client.verifyOtp({ sessionId: this.sessionId, requestId: this.activeRequestId, code });
+    }
+
+    /** Approve or reject a pending tool write to resume the paused turn. */
+    confirmTool(approved: boolean): void {
+        if (!this.client || !this.sessionId || !this.activeRequestId || this.interrupt?.kind !== 'confirm') return;
+        this.client.confirmToolAction({ sessionId: this.sessionId, requestId: this.activeRequestId, approved });
+        this.setInterrupt(null);
     }
 
     private nextId(prefix: string): string {
@@ -127,8 +186,10 @@ export class ConversationController {
             await this.client.connect();
             const session = await this.client.createConversationSession({
                 agentId: this.config.agentId,
-                userName: this.config.userName,
-                userEmail: this.config.userEmail,
+                userName: this.identity.name,
+                userEmail: this.identity.email,
+                // Phone has no first-class field yet; carry it in session metadata.
+                ...(this.identity.phone ? { metadata: { userPhone: this.identity.phone } } : {}),
             });
             this.sessionId = session.sessionId;
             this.setStatus('ready');
@@ -162,6 +223,7 @@ export class ConversationController {
 
         try {
             const turn = this.client.sendMessage({ sessionId: this.sessionId, message: trimmed, stream: true });
+            this.activeRequestId = turn.requestId;
 
             for await (const event of turn) {
                 if (event.type === 'stream_token') {
@@ -170,6 +232,10 @@ export class ConversationController {
                         assistant.text += token;
                         this.emitMessages();
                     }
+                } else {
+                    // OTP / tool-confirmation pauses surface here; the loop keeps
+                    // iterating once the visitor resumes via verifyOtp/confirmTool.
+                    this.handleTurnEvent(event);
                 }
             }
 
@@ -198,6 +264,48 @@ export class ConversationController {
             assistant.text = assistant.text ? `${assistant.text}\n\n${message}` : message;
             this.emitMessages();
             this.setStatus('error', err instanceof Error ? err.message : String(err));
+        } finally {
+            this.activeRequestId = null;
+            this.setInterrupt(null);
+        }
+    }
+
+    /** Map a non-token turn event (OTP / tool-confirmation lifecycle) to interrupt state. */
+    private handleTurnEvent(event: ServerEvent): void {
+        const inner = ((event as { data?: { data?: Record<string, unknown> } }).data?.data ?? {}) as Record<string, unknown>;
+        const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+        const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
+        switch (event.type) {
+            case 'otp_verification_required': {
+                const channels: ('email' | 'sms')[] = Array.isArray(inner.availableChannels)
+                    ? inner.availableChannels.filter((c): c is 'email' | 'sms' => c === 'email' || c === 'sms')
+                    : ['email'];
+                this.setInterrupt({
+                    kind: 'otp',
+                    toolId: str(inner.toolId),
+                    actionDescription: str(inner.actionDescription),
+                    availableChannels: channels.length > 0 ? channels : ['email'],
+                });
+                break;
+            }
+            case 'otp_sent':
+                if (this.interrupt?.kind === 'otp') {
+                    this.setInterrupt({ ...this.interrupt, sent: { channel: str(inner.channel), maskedDestination: str(inner.maskedDestination) }, error: undefined });
+                }
+                break;
+            case 'otp_verified':
+                if (this.interrupt?.kind === 'otp') this.setInterrupt(null);
+                break;
+            case 'otp_invalid':
+                if (this.interrupt?.kind === 'otp') {
+                    this.setInterrupt({ ...this.interrupt, error: str(inner.message) ?? 'That code was incorrect.', attemptsRemaining: num(inner.attemptsRemaining) });
+                }
+                break;
+            case 'write_confirmation_required':
+                this.setInterrupt({ kind: 'confirm', toolId: str(inner.toolId), actionDescription: str(inner.actionDescription) });
+                break;
+            default:
+                break;
         }
     }
 
@@ -206,6 +314,8 @@ export class ConversationController {
         this.client?.disconnect('widget closed');
         this.client = null;
         this.sessionId = null;
+        this.activeRequestId = null;
+        this.setInterrupt(null);
         this.setStatus('closed');
     }
 }

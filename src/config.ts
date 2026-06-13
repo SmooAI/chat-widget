@@ -14,6 +14,8 @@ export interface ChatWidgetTheme {
     primary?: string;
     /** Text color rendered on top of `primary`. */
     primaryText?: string;
+    /** A secondary accent (used for subtle highlights). */
+    secondary?: string;
     /** Inbound (assistant) chat bubble background. */
     assistantBubble?: string;
     /** Inbound (assistant) chat bubble text color. */
@@ -24,6 +26,18 @@ export interface ChatWidgetTheme {
     userBubbleText?: string;
     /** Border color for the panel and input. */
     border?: string;
+
+    // ── Aliases for the dashboard's 10-color model (SmooAI agent widget config).
+    //    When provided, these take precedence over the canonical keys above, so a
+    //    config exported from the agent dashboard themes the widget directly.
+    /** Alias for {@link assistantBubble}. */
+    chatBubbleInbound?: string;
+    /** Alias for {@link assistantBubbleText}. */
+    chatBubbleInboundText?: string;
+    /** Alias for {@link userBubble}. */
+    chatBubbleOutbound?: string;
+    /** Alias for {@link userBubbleText}. */
+    chatBubbleOutboundText?: string;
 }
 
 /**
@@ -55,6 +69,8 @@ export interface ChatWidgetConfig {
     userName?: string;
     /** Optional email address for the user participant. */
     userEmail?: string;
+    /** Optional phone number for the user participant (passed via session metadata). */
+    userPhone?: string;
     /** Placeholder text for the message input. */
     placeholder?: string;
     /** Greeting rendered when the conversation opens (before any messages). */
@@ -63,19 +79,46 @@ export interface ChatWidgetConfig {
     connectionErrorMessage?: string;
     /** Start the panel open instead of collapsed to the launcher. */
     startOpen?: boolean;
+    /**
+     * Suggested starter prompts shown as clickable chips before the first message.
+     * Clicking one sends it. Capped at 5 for layout.
+     */
+    examplePrompts?: string[];
+    /** Require the visitor's name before chatting. */
+    requireName?: boolean;
+    /** Require the visitor's email before chatting. */
+    requireEmail?: boolean;
+    /** Require the visitor's phone before chatting. */
+    requirePhone?: boolean;
+    /**
+     * Let visitors chat without providing any identity. When `true`, the
+     * `require*` flags are ignored and the pre-chat form is skipped.
+     */
+    allowAnonymous?: boolean;
     /** Theme overrides. */
     theme?: ChatWidgetTheme;
 }
 
-/** Resolve a partial config against the built-in defaults. */
-export function resolveConfig(config: ChatWidgetConfig): Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail'>> & {
-    theme: Required<ChatWidgetTheme>;
+/** The fully-resolved theme (canonical keys only — aliases are folded in). */
+export type ResolvedTheme = Required<Omit<ChatWidgetTheme, 'chatBubbleInbound' | 'chatBubbleInboundText' | 'chatBubbleOutbound' | 'chatBubbleOutboundText'>>;
+
+export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone'>> & {
+    theme: ResolvedTheme;
     userName?: string;
     userEmail?: string;
-} {
+    userPhone?: string;
+};
+
+/** Resolve a partial config against the built-in defaults. */
+export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
     const theme = config.theme ?? {};
     const primary = theme.primary ?? '#00a6a6';
     const primaryText = theme.primaryText ?? '#f8fafc';
+    // Dashboard aliases win over canonical keys when present.
+    const assistantBubble = theme.chatBubbleInbound ?? theme.assistantBubble ?? '#06134b';
+    const assistantBubbleText = theme.chatBubbleInboundText ?? theme.assistantBubbleText ?? '#f8fafc';
+    const userBubble = theme.chatBubbleOutbound ?? theme.userBubble ?? primary;
+    const userBubbleText = theme.chatBubbleOutboundText ?? theme.userBubbleText ?? primaryText;
     return {
         endpoint: config.endpoint,
         mode: config.mode ?? 'popover',
@@ -83,20 +126,35 @@ export function resolveConfig(config: ChatWidgetConfig): Required<Omit<ChatWidge
         agentName: config.agentName ?? 'Assistant',
         userName: config.userName,
         userEmail: config.userEmail,
+        userPhone: config.userPhone,
         placeholder: config.placeholder ?? 'Type a message…',
         greeting: config.greeting ?? 'Hi! How can I help you today?',
         connectionErrorMessage: config.connectionErrorMessage ?? "We couldn't reach the chat. Please try again in a moment.",
         startOpen: config.startOpen ?? false,
+        examplePrompts: (config.examplePrompts ?? []).filter((p) => p.trim().length > 0).slice(0, 5),
+        requireName: config.requireName ?? false,
+        requireEmail: config.requireEmail ?? false,
+        requirePhone: config.requirePhone ?? false,
+        allowAnonymous: config.allowAnonymous ?? false,
         theme: {
             text: theme.text ?? '#f8fafc',
             background: theme.background ?? '#040d30',
             primary,
             primaryText,
-            assistantBubble: theme.assistantBubble ?? '#06134b',
-            assistantBubbleText: theme.assistantBubbleText ?? '#f8fafc',
-            userBubble: theme.userBubble ?? primary,
-            userBubbleText: theme.userBubbleText ?? primaryText,
+            secondary: theme.secondary ?? '#ff6b6c',
+            assistantBubble,
+            assistantBubbleText,
+            userBubble,
+            userBubbleText,
             border: theme.border ?? 'rgba(255, 255, 255, 0.1)',
         },
     };
+}
+
+/**
+ * Whether the pre-chat identity form should gate the conversation: at least one
+ * field is required and anonymous chat is not allowed.
+ */
+export function needsUserInfo(resolved: ResolvedConfig): boolean {
+    return !resolved.allowAnonymous && (resolved.requireName || resolved.requireEmail || resolved.requirePhone);
 }
