@@ -1,19 +1,32 @@
-<div align="center">
+<p align="center">
+  <a href="https://smoo.ai"><img src="https://smoo.ai/images/logo/logo.svg" alt="Smoo AI" width="220" /></a>
+</p>
 
-# @smooai/chat-widget
+<h1 align="center">@smooai/chat-widget</h1>
 
-### Embeddable AI chat as a framework-light web component.
+<p align="center">
+  <strong>Embeddable AI chat as a framework-light web component — streaming replies, grounded sources, popover or full-page, themed from a single brand color.</strong>
+</p>
 
-**Streaming replies · grounded sources · popover or full-page · inherits _your_ brand color.**
+<p align="center">
+  <a href="https://www.npmjs.com/package/@smooai/chat-widget"><img src="https://img.shields.io/npm/v/@smooai/chat-widget?style=flat-square&color=00A6A6&label=npm" alt="npm"></a>
+  <img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=flat-square" alt="Smoo AI">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=flat-square" alt="license"></a>
+  <img src="https://img.shields.io/badge/gzip-~19%20kB-FF6B6C?style=flat-square" alt="bundle size">
+  <a href="https://github.com/SmooAI/chat-widget/actions/workflows/ci.yml"><img src="https://github.com/SmooAI/chat-widget/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
 
-[![npm](https://img.shields.io/npm/v/@smooai/chat-widget?color=00a6a6&label=npm)](https://www.npmjs.com/package/@smooai/chat-widget)
-[![CI](https://github.com/SmooAI/chat-widget/actions/workflows/ci.yml/badge.svg)](https://github.com/SmooAI/chat-widget/actions/workflows/ci.yml)
-[![bundle](https://img.shields.io/badge/gzip-~19%20kB-4f8bff)](https://github.com/SmooAI/chat-widget)
-[![license](https://img.shields.io/badge/license-MIT-8b5cf6)](./LICENSE)
-
-</div>
+<p align="center">
+  <a href="#why-this-widget">Features</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#quick-start">Usage</a> ·
+  <a href="#theming">Theming</a> ·
+  <a href="#part-of-smoo-ai">Platform</a>
+</p>
 
 ---
+
+> A self-contained, streaming chat surface you drop into any site with one tag. No React on the host page, no CSS to import, ~19 kB gzipped, with the smooth-operator protocol client built in.
 
 `<smooth-agent-chat>` is a self-contained chat web component for the
 [smooth-operator](https://github.com/SmooAI/smooth-operator) protocol. Drop in one
@@ -235,6 +248,27 @@ pnpm test:e2e       # Playwright live e2e (gated — see e2e/)
 Open `index.html` (e.g. `pnpm dlx serve .`) after a build for the interactive,
 backend-free showcase.
 
+## Part of Smoo AI
+
+`@smooai/chat-widget` is part of the [Smoo AI](https://smoo.ai) platform — an
+AI-powered business platform with AI built into every product. It renders the
+[smooth-operator](https://github.com/SmooAI/smooth-operator) protocol (powered by
+[smooth-operator-core](https://github.com/SmooAI/smooth-operator-core)) and sits
+alongside infrastructure packages like
+[@smooai/config](https://github.com/SmooAI/config) and
+[@smooai/logger](https://github.com/SmooAI/logger).
+
+## Contributing
+
+Issues and PRs welcome. Run `pnpm check` (typecheck + test + build) before opening
+a PR.
+
 ## License
 
-MIT © [SmooAI](https://github.com/SmooAI)
+MIT © [Smoo AI](https://smoo.ai)
+
+---
+
+<p align="center">
+  Built by <a href="https://smoo.ai"><strong>Smoo AI</strong></a> — AI built into every product.
+</p>
