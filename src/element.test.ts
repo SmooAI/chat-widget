@@ -76,4 +76,36 @@ describe('<smooth-agent-chat> render', () => {
         expect(sr.querySelector('.panel')?.classList.contains('fullpage')).toBe(true);
         expect(sr.querySelector('.close')).toBeNull();
     });
+
+    // Configure non-attribute options (examplePrompts / require*) before mount.
+    function mountCfg(cfg: Record<string, unknown>): HTMLElement {
+        defineChatWidget();
+        const el = document.createElement(ELEMENT_TAG) as HTMLElement & { configure: (c: Record<string, unknown>) => void };
+        el.setAttribute('endpoint', 'wss://e/ws');
+        el.setAttribute('agent-id', 'a1');
+        el.configure(cfg);
+        document.body.appendChild(el);
+        return el;
+    }
+
+    it('shows starter-prompt chips in the empty state', () => {
+        const el = mountCfg({ examplePrompts: ['How do I start?', 'Pricing?'] });
+        const chips = el.shadowRoot!.querySelectorAll('.chip');
+        expect(chips.length).toBe(2);
+        expect(chips[0]?.textContent).toBe('How do I start?');
+    });
+
+    it('gates behind the pre-chat form when a field is required', () => {
+        const sr = mountCfg({ requireEmail: true }).shadowRoot!;
+        expect(sr.querySelector('.pc-form')).not.toBeNull();
+        expect(sr.querySelector('input[name="email"]')).not.toBeNull();
+        // No composer is rendered while the gate is up.
+        expect(sr.querySelector('.composer textarea')).toBeNull();
+    });
+
+    it('skips the form when anonymous chat is allowed', () => {
+        const sr = mountCfg({ requireEmail: true, allowAnonymous: true }).shadowRoot!;
+        expect(sr.querySelector('.pc-form')).toBeNull();
+        expect(sr.querySelector('.composer textarea')).not.toBeNull();
+    });
 });

@@ -3,6 +3,34 @@
 All notable changes to `@smooai/chat-widget` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0
+
+Feature-parity pass toward retiring the legacy `@smooai/ui-chat-widget`.
+
+### Added
+
+- **Starter prompts** — `examplePrompts` renders clickable chips in the empty
+  state; tapping one sends it. Capped at 5.
+- **Pre-chat identity form** — `requireName` / `requireEmail` / `requirePhone`
+  gate the conversation behind a styled form (skipped when `allowAnonymous`).
+  Collected name/email flow into the session; phone rides session `metadata`.
+- **Full theming parity** — the theme now accepts the agent dashboard's 10-color
+  model: `secondary` plus `chatBubbleInbound` / `chatBubbleInboundText` /
+  `chatBubbleOutbound` / `chatBubbleOutboundText` aliases (they win over the
+  canonical keys), so a config exported from the dashboard themes the widget
+  directly.
+- **OTP + tool-confirmation (HITL) support** in `ConversationController`: it now
+  surfaces `otp_verification_required` / `otp_sent` / `otp_verified` /
+  `otp_invalid` and `write_confirmation_required` as an `onInterrupt` event, with
+  `verifyOtp(code)` / `confirmTool(approved)` to resume the paused turn.
+  (Built-in dialog UI for these lands next; the protocol plumbing is in place.)
+- npm publishing wired via changesets (`release.yml`).
+
+### Not included
+
+- **Voice** is intentionally absent — the smooth-operator protocol has no audio
+  surface yet, so voice parity is blocked on a backend/protocol feature.
+
 ## 0.2.0
 
 The widget is back as a standalone package — and got a complete visual redesign.

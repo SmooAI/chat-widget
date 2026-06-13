@@ -1,4 +1,4 @@
-import type { ChatWidgetMode, ChatWidgetTheme } from './config.js';
+import type { ChatWidgetMode, ResolvedTheme } from './config.js';
 
 /**
  * Render the widget's scoped stylesheet — the "Aurora Glass" design system.
@@ -22,7 +22,7 @@ import type { ChatWidgetMode, ChatWidgetTheme } from './config.js';
  * `mode` switches host positioning + panel sizing between the floating popover
  * (default) and the full-page layout (fills its container/viewport).
  */
-export function buildStyles(theme: Required<ChatWidgetTheme>, mode: ChatWidgetMode = 'popover'): string {
+export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popover'): string {
     return `
 :host {
     --sac-text: ${theme.text};
@@ -446,6 +446,67 @@ export function buildStyles(theme: Required<ChatWidgetTheme>, mode: ChatWidgetMo
     color: color-mix(in srgb, var(--sac-text) 38%, transparent);
 }
 .footer b { font-weight: 600; color: color-mix(in srgb, var(--sac-text) 55%, transparent); }
+
+/* ─────────────────── Pre-chat identity form ───────────────────────── */
+.prechat { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 18px; padding: 22px 20px; }
+.pc-head { text-align: center; }
+.pc-title { font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+.pc-sub { margin-top: 4px; font-size: 13px; color: color-mix(in srgb, var(--sac-text) 60%, transparent); }
+.pc-form { display: flex; flex-direction: column; gap: 12px; }
+.pc-field { display: flex; flex-direction: column; gap: 5px; }
+.pc-field span { font-size: 12px; font-weight: 600; color: color-mix(in srgb, var(--sac-text) 70%, transparent); }
+.pc-field input {
+    border: 1px solid color-mix(in srgb, var(--sac-border) 80%, transparent);
+    background: var(--sac-surface-2);
+    color: var(--sac-text);
+    border-radius: 12px;
+    padding: 11px 13px;
+    font-family: inherit;
+    font-size: 14px;
+    outline: none;
+    transition: border-color .2s ease, box-shadow .2s ease;
+}
+.pc-field input::placeholder { color: color-mix(in srgb, var(--sac-text) 42%, transparent); }
+.pc-field input:focus {
+    border-color: color-mix(in srgb, var(--sac-primary) 60%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-primary) 14%, transparent);
+}
+.pc-submit {
+    margin-top: 4px;
+    border: none;
+    border-radius: 13px;
+    padding: 12px;
+    cursor: pointer;
+    background: linear-gradient(150deg, var(--sac-primary), var(--sac-primary-2));
+    color: var(--sac-primary-text);
+    font-weight: 650;
+    font-size: 14px;
+    box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--sac-primary) 65%, transparent), 0 1px 0 rgba(255, 255, 255, .25) inset;
+    transition: transform .2s var(--sac-ease);
+}
+.pc-submit:hover { transform: translateY(-1px); }
+.pc-submit:active { transform: scale(.98); }
+
+/* ─────────────────── Starter-prompt chips ─────────────────────────── */
+.prompts { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 2px 35px; }
+.panel.fullpage .prompts { margin-left: auto; margin-right: auto; max-width: 760px; width: 100%; }
+.chip {
+    border: 1px solid color-mix(in srgb, var(--sac-border) 80%, transparent);
+    background: var(--sac-surface-2);
+    color: var(--sac-text);
+    border-radius: 999px;
+    padding: 8px 13px;
+    font-family: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color .2s ease, background .2s ease, transform .2s ease;
+}
+.chip:hover {
+    border-color: color-mix(in srgb, var(--sac-primary) 50%, transparent);
+    background: color-mix(in srgb, var(--sac-primary) 10%, var(--sac-surface-2));
+    transform: translateY(-1px);
+}
 
 .hidden { display: none !important; }
 

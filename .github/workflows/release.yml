@@ -1,0 +1,77 @@
+# Changesets-driven npm release for @smooai/chat-widget.
+#
+# Flow (the @smooai/smooth-operator model):
+#   1. PRs land with a `.changeset/*.md` describing the bump.
+#   2. This workflow opens/updates a "🦋 New version release" PR that runs
+#      `changeset version` (bumps package.json + CHANGELOG).
+#   3. Merging that PR re-runs this workflow, which publishes to npm.
+#
+# Secrets (org-wide): GH_PAT, SMOOAI_NPM_TOKEN.
+name: Release (Changesets 🦋)
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - main
+
+env:
+    CI: true
+
+concurrency:
+    group: release
+    cancel-in-progress: false
+
+jobs:
+    release:
+        timeout-minutes: 20
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            pull-requests: write
+            id-token: write
+            actions: write
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  token: ${{ secrets.GH_PAT }}
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: 9
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+
+            - name: Install
+              run: pnpm install --frozen-lockfile
+
+            - name: Typecheck + test + build
+              run: pnpm check
+
+            - name: Version + publish (Changesets 🦋)
+              id: changesets
+              uses: changesets/action@v1
+              with:
+                  commit: '🦋 New version release'
+                  title: '🦋 New version release'
+                  version: pnpm changeset version
+                  publish: pnpm ci:publish
+                  createGithubReleases: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+                  NPM_TOKEN: ${{ secrets.SMOOAI_NPM_TOKEN }}
+
+            - name: Auto-merge the Changeset PR
+              run: |
+                  PR_NUMBER=$(gh pr list --state open --head changeset-release/main --json number --jq '.[0].number')
+                  if [[ -n "$PR_NUMBER" && "$PR_NUMBER" != "null" ]]; then
+                      gh pr merge "$PR_NUMBER" --auto --squash
+                  fi
+              env:
+                  GH_TOKEN: ${{ secrets.GH_PAT }}
