@@ -1,9 +1,32 @@
 {
     "name": "@smooai/chat-widget",
-    "version": "0.1.0",
-    "description": "Embeddable chat widget for smooth-operator — a framework-light web component that speaks the schema-driven WebSocket protocol. Built with tsdown.",
+    "version": "0.2.0",
+    "description": "Embeddable AI chat as a framework-light web component — the Aurora Glass design, streaming replies, grounded sources, and per-brand theming. Speaks the smooth-operator WebSocket protocol.",
     "license": "MIT",
+    "author": "SmooAI",
     "type": "module",
+    "homepage": "https://github.com/SmooAI/chat-widget#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/SmooAI/chat-widget.git"
+    },
+    "bugs": {
+        "url": "https://github.com/SmooAI/chat-widget/issues"
+    },
+    "keywords": [
+        "chat-widget",
+        "chatbot",
+        "ai",
+        "ai-chat",
+        "web-component",
+        "custom-element",
+        "embeddable",
+        "websocket",
+        "streaming",
+        "smooth-operator",
+        "support-chat",
+        "livechat"
+    ],
     "engines": {
         "node": ">=22"
     },
@@ -19,22 +42,36 @@
     },
     "files": [
         "dist",
-        "src"
+        "src",
+        "!src/**/*.test.ts"
     ],
+    "sideEffects": [
+        "**/standalone.ts",
+        "**/standalone.js",
+        "**/chat-widget.global.js"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
     "scripts": {
         "build": "tsdown",
         "dev": "tsdown --watch",
         "typecheck": "tsc --noEmit",
         "typecheck:e2e": "tsc --noEmit -p tsconfig.e2e.json",
-        "test:e2e": "playwright test --project=chromium"
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:e2e": "playwright test --project=chromium",
+        "check": "pnpm typecheck && pnpm test && pnpm build"
     },
     "dependencies": {
-        "@smooai/smooth-operator": "^0.1.0"
+        "@smooai/smooth-operator": "^0.2.0"
     },
     "devDependencies": {
         "@playwright/test": "^1.49.0",
         "@types/node": "^22.10.0",
+        "jsdom": "^25.0.1",
         "tsdown": "^0.22.0",
-        "typescript": "^5.7.3"
+        "typescript": "^5.7.3",
+        "vitest": "^2.1.8"
     }
 }
