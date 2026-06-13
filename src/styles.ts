@@ -508,6 +508,63 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
     transform: translateY(-1px);
 }
 
+/* ─────────────── OTP / tool-confirmation interrupt ────────────────── */
+.interrupt { padding: 0 14px; }
+.int-card {
+    border: 1px solid color-mix(in srgb, var(--sac-primary) 35%, var(--sac-border));
+    background: color-mix(in srgb, var(--sac-primary) 8%, var(--sac-surface-2));
+    border-radius: 14px;
+    padding: 12px 13px;
+    animation: sac-msg-in .3s var(--sac-ease) both;
+}
+.int-head { display: flex; align-items: center; gap: 8px; }
+.int-ico { display: flex; color: var(--sac-primary); }
+.int-ico svg { width: 17px; height: 17px; }
+.int-title { font-size: 13.5px; font-weight: 650; }
+.int-desc { margin-top: 5px; font-size: 12.5px; line-height: 1.45; color: color-mix(in srgb, var(--sac-text) 80%, transparent); }
+.int-sent { margin-top: 6px; font-size: 11.5px; color: color-mix(in srgb, var(--sac-text) 60%, transparent); }
+.int-row { display: flex; gap: 8px; margin-top: 10px; }
+.int-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--sac-border) 80%, transparent);
+    background: var(--sac-bg);
+    color: var(--sac-text);
+    border-radius: 10px;
+    padding: 9px 11px;
+    font-family: inherit;
+    font-size: 14px;
+    letter-spacing: .14em;
+    outline: none;
+    transition: border-color .2s ease, box-shadow .2s ease;
+}
+.int-input:focus {
+    border-color: color-mix(in srgb, var(--sac-primary) 60%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-primary) 14%, transparent);
+}
+.int-btn {
+    border: 1px solid color-mix(in srgb, var(--sac-border) 80%, transparent);
+    background: var(--sac-surface-2);
+    color: var(--sac-text);
+    border-radius: 10px;
+    padding: 9px 14px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform .2s var(--sac-ease), background .2s ease, border-color .2s ease;
+}
+.int-btn:hover { transform: translateY(-1px); }
+.int-btn.primary {
+    border: none;
+    background: linear-gradient(150deg, var(--sac-primary), var(--sac-primary-2));
+    color: var(--sac-primary-text);
+    box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--sac-primary) 65%, transparent);
+}
+.int-row .int-btn { flex: 1; }
+.int-row .int-input + .int-btn { flex: 0 0 auto; }
+.int-error { margin-top: 8px; font-size: 12px; color: #f87171; }
+
 .hidden { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {

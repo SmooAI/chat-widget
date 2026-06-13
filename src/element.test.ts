@@ -108,4 +108,12 @@ describe('<smooth-agent-chat> render', () => {
         expect(sr.querySelector('.pc-form')).toBeNull();
         expect(sr.querySelector('.composer textarea')).not.toBeNull();
     });
+
+    it('ships an interrupt overlay container, hidden until a turn pauses', () => {
+        const sr = mount({ endpoint: 'wss://e/ws', 'agent-id': 'a1' }).shadowRoot!;
+        const overlay = sr.querySelector('.interrupt');
+        expect(overlay).not.toBeNull();
+        expect(overlay?.classList.contains('hidden')).toBe(true);
+        expect(overlay?.childElementCount).toBe(0);
+    });
 });

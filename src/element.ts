@@ -16,7 +16,7 @@
  */
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { needsUserInfo, resolveConfig } from './config.js';
-import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController } from './conversation.js';
+import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type Interrupt } from './conversation.js';
 import { SMOOTH_LOGO_SVG } from './logo.js';
 import { buildStyles } from './styles.js';
 
@@ -39,6 +39,10 @@ const ICON = {
     send: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 19V6M12 6l-5.5 5.5M12 6l5.5 5.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
     /** Sources disclosure caret. */
     chev: `<svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    /** OTP interrupt — a padlock. */
+    lock: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="10.5" width="14" height="9.5" rx="2.2" stroke="currentColor" stroke-width="1.7"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" stroke="currentColor" stroke-width="1.7"/></svg>`,
+    /** Tool-confirmation interrupt — a shield. */
+    shield: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3 5 6v5c0 4.4 3 7.2 7 8.5 4-1.3 7-4.1 7-8.5V6l-7-3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m9 11.5 2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 } as const;
 
 /**
@@ -78,6 +82,9 @@ export class SmoothAgentChatElement extends HTMLElement {
     private hasSent = false;
     /** Starter prompts shown as chips in the empty state. */
     private examplePrompts: string[] = [];
+    /** Current mid-turn interrupt (OTP / tool-confirmation), or null. */
+    private interrupt: Interrupt | null = null;
+    private interruptEl: HTMLElement | null = null;
 
     // Cached DOM refs (populated in render()).
     private panelEl: HTMLElement | null = null;
@@ -187,6 +194,10 @@ export class SmoothAgentChatElement extends HTMLElement {
                     this.renderStatus();
                     this.renderComposerState();
                 },
+                onInterrupt: (interrupt) => {
+                    this.interrupt = interrupt;
+                    this.renderInterrupt();
+                },
             });
             if (resolved.startOpen) this.open = true;
         }
@@ -243,6 +254,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             </div>`;
         const chatHtml = `
                 <div class="messages"></div>
+                <div class="interrupt hidden"></div>
                 <div class="composer-wrap">
                     <div class="composer">
                         <textarea rows="1" placeholder="${escapeHtml(resolved.placeholder)}"></textarea>
@@ -274,6 +286,7 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.dotEl = container.querySelector('.dot');
         this.inputEl = container.querySelector('textarea');
         this.sendBtn = container.querySelector('.send');
+        this.interruptEl = container.querySelector('.interrupt');
 
         this.launcherEl?.addEventListener('click', () => this.openChat());
         container.querySelector('.close')?.addEventListener('click', () => this.closeChat());
@@ -300,6 +313,103 @@ export class SmoothAgentChatElement extends HTMLElement {
         if (!gating) this.renderMessages(resolved.greeting);
         this.renderStatus();
         this.renderComposerState();
+        this.renderInterrupt();
+    }
+
+    /**
+     * Render (or clear) the mid-turn interrupt overlay above the composer:
+     * an OTP code prompt or a tool-write confirmation. Server-supplied text is
+     * set via `textContent` (never innerHTML); only static icons use innerHTML.
+     */
+    private renderInterrupt(): void {
+        const el = this.interruptEl;
+        if (!el) return;
+        el.replaceChildren();
+        const it = this.interrupt;
+        if (!it) {
+            el.classList.add('hidden');
+            return;
+        }
+        el.classList.remove('hidden');
+
+        const card = document.createElement('div');
+        card.className = 'int-card';
+
+        const head = document.createElement('div');
+        head.className = 'int-head';
+        const ico = document.createElement('span');
+        ico.className = 'int-ico';
+        ico.innerHTML = it.kind === 'otp' ? ICON.lock : ICON.shield; // static, trusted
+        const title = document.createElement('span');
+        title.className = 'int-title';
+        title.textContent = it.kind === 'otp' ? 'Verification required' : 'Confirm this action';
+        head.append(ico, title);
+        card.appendChild(head);
+
+        if (it.actionDescription) {
+            const desc = document.createElement('div');
+            desc.className = 'int-desc';
+            desc.textContent = it.actionDescription;
+            card.appendChild(desc);
+        }
+
+        if (it.kind === 'otp') {
+            if (it.sent?.maskedDestination) {
+                const sent = document.createElement('div');
+                sent.className = 'int-sent';
+                sent.textContent = `Code sent to ${it.sent.maskedDestination}${it.sent.channel ? ` via ${it.sent.channel}` : ''}.`;
+                card.appendChild(sent);
+            }
+            const row = document.createElement('div');
+            row.className = 'int-row';
+            const input = document.createElement('input');
+            input.className = 'int-input';
+            input.type = 'text';
+            input.inputMode = 'numeric';
+            input.autocomplete = 'one-time-code';
+            input.placeholder = 'Enter code';
+            const submit = () => {
+                const code = input.value.trim();
+                if (code) this.controller?.verifyOtp(code);
+            };
+            input.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    submit();
+                }
+            });
+            const verify = document.createElement('button');
+            verify.className = 'int-btn primary';
+            verify.type = 'button';
+            verify.textContent = 'Verify';
+            verify.addEventListener('click', submit);
+            row.append(input, verify);
+            card.appendChild(row);
+            if (it.error) {
+                const err = document.createElement('div');
+                err.className = 'int-error';
+                err.textContent = it.attemptsRemaining != null ? `${it.error} (${it.attemptsRemaining} left)` : it.error;
+                card.appendChild(err);
+            }
+            queueMicrotask(() => input.focus());
+        } else {
+            const row = document.createElement('div');
+            row.className = 'int-row';
+            const decline = document.createElement('button');
+            decline.className = 'int-btn';
+            decline.type = 'button';
+            decline.textContent = 'Decline';
+            decline.addEventListener('click', () => this.controller?.confirmTool(false));
+            const approve = document.createElement('button');
+            approve.className = 'int-btn primary';
+            approve.type = 'button';
+            approve.textContent = 'Approve';
+            approve.addEventListener('click', () => this.controller?.confirmTool(true));
+            row.append(decline, approve);
+            card.appendChild(row);
+        }
+
+        el.appendChild(card);
     }
 
     /** Collect identity from the pre-chat form, then drop into the chat view. */
