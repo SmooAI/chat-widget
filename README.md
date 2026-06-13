@@ -155,12 +155,15 @@ mountChatWidget({
   the collected name/email are attached to the conversation session (phone rides
   session metadata). Set **`allowAnonymous: true`** to skip the form.
 
-### OTP & tool confirmation (programmatic)
+### OTP & tool confirmation (HITL)
 
-The `ConversationController` surfaces mid-turn pauses via an `onInterrupt`
-callback — `otp_verification_required` and `write_confirmation_required` — and
-resumes them with `verifyOtp(code)` / `confirmTool(approved)`. (A built-in dialog
-UI for these is on the roadmap; the protocol plumbing ships today.)
+When a turn pauses for **OTP verification** or a **tool-write approval**, the
+widget shows an inline overlay above the composer — an OTP code prompt (with
+masked destination + retry state) or an Approve/Decline confirmation — and
+resumes the turn automatically. Under the hood the `ConversationController`
+surfaces `otp_verification_required` / `write_confirmation_required` via an
+`onInterrupt` callback and resumes with `verifyOtp(code)` / `confirmTool(approved)`,
+so you can also drive it programmatically.
 
 ## Full-page mode
 
