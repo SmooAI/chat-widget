@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- 3e4c979: Feature-parity pass toward retiring `@smooai/ui-chat-widget`: starter-prompt chips (`examplePrompts`), a pre-chat identity form (`requireName`/`requireEmail`/`requirePhone`/`allowAnonymous`), full dashboard theming parity (10-color model via `secondary` + `chatBubble*` aliases), and OTP + tool-confirmation (HITL) support in `ConversationController` (`onInterrupt` + `verifyOtp`/`confirmTool`). Voice remains out of scope (no smooth-operator protocol support yet).
+
 All notable changes to `@smooai/chat-widget` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -38,17 +44,17 @@ The widget is back as a standalone package — and got a complete visual redesig
 ### Added
 
 - **"Aurora Glass" design system** — a full rebuild of the widget's visual layer:
-    - Spring launcher with a live "presence pulse" breathing ring and a crafted
-      chat-spark icon (no more emoji).
-    - Glass-depth panel with layered ambient shadows, a brand-tinted top glow, and
-      a spring entrance animation.
-    - Header with a gradient brand avatar (agent monogram), a live connection
-      status dot (green online / amber connecting / red error), and an icon close.
-    - Message rows with assistant mini-avatars, a real animated **typing
-      indicator**, message rise-in, and a refined streaming cursor.
-    - Refined **Sources** disclosure with a count pill and accent cards.
-    - Icon composer: a focus-lit field with a circular gradient send button,
-      auto-growing textarea, and a "powered by smooth-operator" footer.
+  - Spring launcher with a live "presence pulse" breathing ring and a crafted
+    chat-spark icon (no more emoji).
+  - Glass-depth panel with layered ambient shadows, a brand-tinted top glow, and
+    a spring entrance animation.
+  - Header with a gradient brand avatar (agent monogram), a live connection
+    status dot (green online / amber connecting / red error), and an icon close.
+  - Message rows with assistant mini-avatars, a real animated **typing
+    indicator**, message rise-in, and a refined streaming cursor.
+  - Refined **Sources** disclosure with a count pill and accent cards.
+  - Icon composer: a focus-lit field with a circular gradient send button,
+    auto-growing textarea, and a "powered by smooth-operator" footer.
 - **Derived theme tokens** — `primary-2` (gradient depth) and `surface-2` (inset
   wash) are computed in CSS from `primary`/`text`, so a single `primary` color
   themes the whole widget and adapts to light or dark automatically.
