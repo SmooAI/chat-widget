@@ -1,27 +1,20 @@
 <p align="center">
-  <a href="https://smoo.ai"><img src="https://smoo.ai/images/logo/logo.svg" alt="Smoo AI" width="220" /></a>
-</p>
-
-<h1 align="center">@smooai/chat-widget</h1>
-
-<p align="center">
-  <strong>Embeddable AI chat as a framework-light web component — streaming replies, grounded sources, popover or full-page, themed from a single brand color.</strong>
+  <a href="https://smoo.ai"><img src=".github/banner.png" alt="@smooai/chat-widget — Embeddable AI chat as a web component" width="100%" /></a>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@smooai/chat-widget"><img src="https://img.shields.io/npm/v/@smooai/chat-widget?style=flat-square&color=00A6A6&label=npm" alt="npm"></a>
-  <img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=flat-square" alt="Smoo AI">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=flat-square" alt="license"></a>
+  <a href="https://www.npmjs.com/package/@smooai/chat-widget"><img src="https://img.shields.io/npm/v/@smooai/chat-widget?style=for-the-badge&color=00A6A6&label=npm&logo=npm&logoColor=white&labelColor=020618" alt="npm"></a>
+  <a href="https://smoo.ai/platform/support"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/gzip-~19%20kB-FF6B6C?style=flat-square" alt="bundle size">
   <a href="https://github.com/SmooAI/chat-widget/actions/workflows/ci.yml"><img src="https://github.com/SmooAI/chat-widget/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
 <p align="center">
-  <a href="#why-this-widget">Features</a> ·
-  <a href="#install">Install</a> ·
-  <a href="#quick-start">Usage</a> ·
-  <a href="#theming">Theming</a> ·
-  <a href="#part-of-smoo-ai">Platform</a>
+  <a href="#why-this-widget"><b>Features</b></a> &nbsp;·&nbsp; <a href="#install"><b>Install</b></a> &nbsp;·&nbsp; <a href="#quick-start"><b>Usage</b></a> &nbsp;·&nbsp; <a href="#theming"><b>Theming</b></a> &nbsp;·&nbsp; <a href="#part-of-smoo-ai"><b>Platform</b></a>
 </p>
 
 ---
@@ -250,13 +243,11 @@ backend-free showcase.
 
 ## Part of Smoo AI
 
-`@smooai/chat-widget` is part of the [Smoo AI](https://smoo.ai) platform — an
-AI-powered business platform with AI built into every product. It renders the
-[smooth-operator](https://github.com/SmooAI/smooth-operator) protocol (powered by
-[smooth-operator-core](https://github.com/SmooAI/smooth-operator-core)) and sits
-alongside infrastructure packages like
-[@smooai/config](https://github.com/SmooAI/config) and
-[@smooai/logger](https://github.com/SmooAI/logger).
+`@smooai/chat-widget` is built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered business platform with AI built into every product: CRM, customer support, campaigns, field service, observability, and developer tools.
+
+- 🚀 **Customer support on the platform** — [smoo.ai/platform/support](https://smoo.ai/platform/support)
+- 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
+- 🧩 **Sibling repos** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (the protocol it renders), [smooth-operator-core](https://github.com/SmooAI/smooth-operator-core) (the engine), [@smooai/config](https://github.com/SmooAI/config), [@smooai/logger](https://github.com/SmooAI/logger)
 
 ## Contributing
 
