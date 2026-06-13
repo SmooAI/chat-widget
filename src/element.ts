@@ -1,13 +1,14 @@
 /**
  * `<smooth-agent-chat>` — a framework-light embeddable chat web component.
  *
- * Ported (and simplified) from smooai's `@smooai/ui-chat-widget`. The original is a
- * React custom element that mounts the heavyweight `@smooai/ui` ChatWidget and
- * pulls in the whole monorepo (Tailwind, shadcn, react-phone-number-input, MSW,
- * Supabase auth …). This is a clean, dependency-light rewrite that preserves the
- * embedding model — a custom element with a launcher + popover panel, declarative
- * HTML attributes, and a programmatic API — while talking to the
- * `@smooai/smooth-operator` protocol client instead of `@smooai/realtime`.
+ * A clean, dependency-light web component that preserves a familiar embedding
+ * model — a launcher + popover panel, declarative HTML attributes, and a
+ * programmatic API — while talking to the `@smooai/smooth-operator` protocol
+ * client. The visual layer is the "Aurora Glass" design system (see
+ * {@link buildStyles}): a spring launcher with a live presence pulse, a
+ * glass-depth panel, a gradient brand avatar + status dot, an animated typing
+ * indicator, message rise-in, refined source cards, and an icon composer. Every
+ * color is driven by `--sac-*` custom properties so a host's brand flows through.
  *
  * Embedding model:
  *   <smooth-agent-chat endpoint="ws://localhost:8787/ws" agent-id="…"></smooth-agent-chat>
@@ -22,6 +23,23 @@ import { buildStyles } from './styles.js';
 export const ELEMENT_TAG = 'smooth-agent-chat';
 
 const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'placeholder', 'greeting', 'start-open', 'mode'] as const;
+
+/**
+ * Inline SVG icons (static, trusted strings — never interpolated with user data).
+ * Kept here so the IIFE bundle is self-contained: no icon-font or network fetch.
+ */
+const ICON = {
+    /** Launcher — a speech bubble carrying a spark (chat + AI). */
+    spark: `<svg class="ico" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3.5c-4.7 0-8.5 3.2-8.5 7.2 0 2.2 1.2 4.2 3 5.5v3.3l3.2-1.7c.7.1 1.5.2 2.3.2 4.7 0 8.5-3.2 8.5-7.3S16.7 3.5 12 3.5Z" fill="currentColor" opacity=".22"/><path d="M13.4 7.2 9 12.6h2.6l-1 4.2 4.4-5.4h-2.6l1-4.2Z" fill="currentColor"/></svg>`,
+    /** Small assistant avatar used beside each assistant message. */
+    bot: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4.5" y="7.5" width="15" height="11" rx="3.5" stroke="currentColor" stroke-width="1.6"/><path d="M12 4.5v3M8.5 12.2h.01M15.5 12.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M9.5 15.4c.7.6 1.5.9 2.5.9s1.8-.3 2.5-.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+    /** Close (collapse panel) — a downward chevron. */
+    close: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    /** Send — an upward arrow. */
+    send: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 19V6M12 6l-5.5 5.5M12 6l5.5 5.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    /** Sources disclosure caret. */
+    chev: `<svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+} as const;
 
 /**
  * Return `url` only if it is a valid absolute `http(s)` URL, else `null`.
@@ -60,6 +78,7 @@ export class SmoothAgentChatElement extends HTMLElement {
     private launcherEl: HTMLElement | null = null;
     private messagesEl: HTMLElement | null = null;
     private statusEl: HTMLElement | null = null;
+    private dotEl: HTMLElement | null = null;
     private inputEl: HTMLTextAreaElement | null = null;
     private sendBtn: HTMLButtonElement | null = null;
 
@@ -168,38 +187,41 @@ export class SmoothAgentChatElement extends HTMLElement {
         const style = document.createElement('style');
         style.textContent = buildStyles(resolved.theme, resolved.mode);
 
-        // Header: in full-page mode lead with the Smooth logo (falls back to the
-        // agent name) + a subtle "powered by smooth-operator"; in popover mode the
-        // compact agent-name title we've always shown. The close button only
-        // exists in popover mode (full-page has nothing to collapse to).
-        const headerBrand = fullpage
-            ? `<div class="brand">
-                    <span class="logo-wrap">${SMOOTH_LOGO_SVG}</span>
-                    <div>
-                        <div class="title">${escapeHtml(resolved.agentName)}</div>
-                        <div class="status"></div>
+        // Header: in full-page mode lead with the Smooth logo in the avatar tile
+        // and a subtle "powered by" tag; in popover mode show a brand-colored
+        // monogram avatar + a compact close (collapse) button.
+        const monogram = escapeHtml((resolved.agentName.trim().charAt(0) || 'A').toUpperCase());
+        const header = fullpage
+            ? `<div class="header">
+                    <div class="avatar"><span class="logo-wrap">${SMOOTH_LOGO_SVG}</span></div>
+                    <div class="meta">
+                        <span class="title">${escapeHtml(resolved.agentName)}</span>
+                        <span class="status"><span class="dot off"></span><span class="status-text"></span></span>
                     </div>
-                </div>
-                <div class="powered">powered by smooth-operator</div>`
-            : `<div class="brand">
-                    <div>
-                        <div class="title">${escapeHtml(resolved.agentName)}</div>
-                        <div class="status"></div>
+                    <span class="powered">powered by smooth-operator</span>
+                </div>`
+            : `<div class="header">
+                    <div class="avatar">${monogram}</div>
+                    <div class="meta">
+                        <span class="title">${escapeHtml(resolved.agentName)}</span>
+                        <span class="status"><span class="dot off"></span><span class="status-text"></span></span>
                     </div>
-                </div>
-                <button class="close" aria-label="Close chat">×</button>`;
+                    <button class="close" aria-label="Close chat">${ICON.close}</button>
+                </div>`;
 
         const container = document.createElement('div');
         container.innerHTML = `
-            ${fullpage ? '' : '<button class="launcher" part="launcher" aria-label="Open chat">💬</button>'}
+            ${fullpage ? '' : `<button class="launcher" part="launcher" aria-label="Open chat">${ICON.spark}</button>`}
             <div class="panel${fullpage ? ' fullpage' : ' hidden'}" part="panel" role="${fullpage ? 'region' : 'dialog'}" aria-label="${escapeHtml(resolved.agentName)} chat">
-                <div class="header">
-                    ${headerBrand}
-                </div>
+                ${header}
+                <div class="header-sep"></div>
                 <div class="messages"></div>
-                <div class="composer">
-                    <textarea rows="1" placeholder="${escapeHtml(resolved.placeholder)}"></textarea>
-                    <button class="send" type="button">Send</button>
+                <div class="composer-wrap">
+                    <div class="composer">
+                        <textarea rows="1" placeholder="${escapeHtml(resolved.placeholder)}"></textarea>
+                        <button class="send" type="button" aria-label="Send message">${ICON.send}</button>
+                    </div>
+                    <div class="footer">powered by <b>smooth&#8209;operator</b></div>
                 </div>
             </div>
         `;
@@ -213,13 +235,15 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.launcherEl = container.querySelector('.launcher');
         this.panelEl = container.querySelector('.panel');
         this.messagesEl = container.querySelector('.messages');
-        this.statusEl = container.querySelector('.status');
+        this.statusEl = container.querySelector('.status-text');
+        this.dotEl = container.querySelector('.dot');
         this.inputEl = container.querySelector('textarea');
         this.sendBtn = container.querySelector('.send');
 
         this.launcherEl?.addEventListener('click', () => this.openChat());
         container.querySelector('.close')?.addEventListener('click', () => this.closeChat());
         this.sendBtn?.addEventListener('click', () => this.submit());
+        this.inputEl?.addEventListener('input', () => this.autosize());
         this.inputEl?.addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter' && !ev.shiftKey) {
                 ev.preventDefault();
@@ -247,33 +271,39 @@ export class SmoothAgentChatElement extends HTMLElement {
         if (this.open) this.inputEl?.focus();
     }
 
+    /** Grow the textarea with its content, up to the CSS max-height. */
+    private autosize(): void {
+        const ta = this.inputEl;
+        if (!ta) return;
+        ta.style.height = 'auto';
+        ta.style.height = `${ta.scrollHeight}px`;
+    }
+
     private renderMessages(greeting: string): void {
         if (!this.messagesEl) return;
         this.messagesEl.replaceChildren();
 
         if (this.messages.length === 0 && greeting) {
-            const g = document.createElement('div');
-            g.className = 'bubble assistant greeting';
-            g.textContent = greeting;
-            this.messagesEl.appendChild(g);
+            this.messagesEl.appendChild(this.buildRow('assistant', this.greetingBubble(greeting)));
         }
 
         for (const msg of this.messages) {
-            const el = document.createElement('div');
-            el.className = `bubble ${msg.role}`;
-            if (msg.streaming && !msg.text) {
-                el.classList.add('cursor');
+            const bubble = document.createElement('div');
+            bubble.className = `bubble ${msg.role}`;
+            if (msg.role === 'assistant' && msg.streaming && !msg.text) {
+                // No text yet → animated typing indicator.
+                bubble.classList.add('typing');
+                bubble.append(this.typingDot(), this.typingDot(), this.typingDot());
             } else if (msg.streaming) {
-                el.classList.add('cursor');
-                el.textContent = msg.text;
+                bubble.classList.add('cursor');
+                bubble.textContent = msg.text;
             } else {
-                el.textContent = msg.text;
+                bubble.textContent = msg.text;
             }
-            this.messagesEl.appendChild(el);
+            this.messagesEl.appendChild(this.buildRow(msg.role, bubble));
 
             // Render a "Sources (N)" section under any assistant message whose
-            // terminal eventual_response carried citations. Back-compatible: most
-            // turns have none, so this is skipped.
+            // terminal eventual_response carried citations.
             if (msg.role === 'assistant' && !msg.streaming && msg.citations && msg.citations.length > 0) {
                 this.messagesEl.appendChild(this.renderSources(msg.citations));
             }
@@ -281,12 +311,36 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     }
 
+    /** Wrap a bubble in a `.row`, prefixing assistant rows with a mini avatar. */
+    private buildRow(role: 'user' | 'assistant', bubble: HTMLElement): HTMLElement {
+        const row = document.createElement('div');
+        row.className = `row ${role}`;
+        if (role === 'assistant') {
+            const mini = document.createElement('div');
+            mini.className = 'mini';
+            mini.innerHTML = ICON.bot; // static, trusted
+            row.appendChild(mini);
+        }
+        row.appendChild(bubble);
+        return row;
+    }
+
+    private greetingBubble(greeting: string): HTMLElement {
+        const b = document.createElement('div');
+        b.className = 'bubble assistant greeting';
+        b.textContent = greeting;
+        return b;
+    }
+
+    private typingDot(): HTMLElement {
+        return document.createElement('i');
+    }
+
     /**
      * Build the collapsible "Sources (N)" block for an assistant message's
-     * citations. Each source renders its `title` (linked to `citation.url` when
-     * present — `target=_blank rel=noopener` — plain text otherwise) plus the
-     * grounding `snippet`. Built with DOM APIs (not innerHTML) so citation text
-     * can't inject markup.
+     * citations. Title/snippet are set via `textContent` (never innerHTML) so
+     * citation text can't inject markup; only the static chevron + numeric count
+     * use innerHTML.
      */
     private renderSources(citations: Citation[]): HTMLElement {
         const wrap = document.createElement('div');
@@ -297,7 +351,15 @@ export class SmoothAgentChatElement extends HTMLElement {
         details.open = true;
 
         const summary = document.createElement('summary');
-        summary.textContent = `Sources (${citations.length})`;
+        const chev = document.createElement('span');
+        chev.className = 'chev';
+        chev.innerHTML = ICON.chev; // static, trusted
+        const label = document.createElement('span');
+        label.textContent = 'Sources';
+        const count = document.createElement('span');
+        count.className = 'count';
+        count.textContent = String(citations.length);
+        summary.append(chev, label, count);
         details.appendChild(summary);
 
         const list = document.createElement('ol');
@@ -339,7 +401,6 @@ export class SmoothAgentChatElement extends HTMLElement {
     }
 
     private renderStatus(): void {
-        if (!this.statusEl) return;
         const label: Record<ConnectionStatus, string> = {
             idle: '',
             connecting: 'Connecting…',
@@ -347,7 +408,12 @@ export class SmoothAgentChatElement extends HTMLElement {
             error: 'Connection issue',
             closed: 'Disconnected',
         };
-        this.statusEl.textContent = label[this.status];
+        if (this.statusEl) this.statusEl.textContent = label[this.status];
+        if (this.dotEl) {
+            // ready → green (no modifier); connecting → amber; error → red; else grey.
+            const mod = this.status === 'ready' ? '' : this.status === 'connecting' ? ' connecting' : this.status === 'error' ? ' error' : ' off';
+            this.dotEl.className = `dot${mod}`;
+        }
     }
 
     private renderComposerState(): void {
@@ -361,6 +427,7 @@ export class SmoothAgentChatElement extends HTMLElement {
         const text = this.inputEl.value;
         if (!text.trim()) return;
         this.inputEl.value = '';
+        this.autosize();
         void this.controller.send(text);
     }
 }

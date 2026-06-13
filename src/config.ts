@@ -96,7 +96,7 @@ export function resolveConfig(config: ChatWidgetConfig): Required<Omit<ChatWidge
             assistantBubbleText: theme.assistantBubbleText ?? '#f8fafc',
             userBubble: theme.userBubble ?? primary,
             userBubbleText: theme.userBubbleText ?? primaryText,
-            border: theme.border ?? '#0a1f7a',
+            border: theme.border ?? 'rgba(255, 255, 255, 0.1)',
         },
     };
 }
