@@ -66,7 +66,36 @@ installed automatically.
 
 ## Quick start
 
-### 1. Declarative — a `<script>` tag + the element
+### 1. Recommended — the deferred loader (best Core Web Vitals)
+
+Include the tiny **loader** (~2 KB gzipped) eagerly. It does nothing expensive on
+load — it waits until the page is past its critical render (`requestIdleCallback`
+after `load`, **or** the visitor's first pointer/keydown/scroll, **or** an 8 s
+fallback), and only *then* injects the full widget module. The widget never
+competes with your page's LCP/TBT, but it's instantly there the moment a visitor
+shows intent.
+
+```html
+<script>
+    window.SmoothAgentChatConfig = {
+        endpoint: 'wss://your-host/ws',
+        agentId: '11111111-1111-4111-8111-111111111111',
+        agentName: 'Support',
+        greeting: 'Hi! How can I help?',
+    };
+</script>
+<script src="https://unpkg.com/@smooai/chat-widget/dist/chat-widget-loader.global.js" async></script>
+```
+
+The loader resolves the widget module as a sibling of its own URL (override with
+`data-src`), so a single CDN path is all you need. For the simplest installs you
+can skip the config global and use `data-*` attributes on the loader tag
+(`data-endpoint`, `data-agent-id`, `data-primary`, `data-mode`).
+
+### 2. Declarative — eager `<script>` + the element
+
+Simplest, but the module evaluates during page load — prefer the loader above on
+performance-sensitive (especially marketing) pages.
 
 ```html
 <script src="https://unpkg.com/@smooai/chat-widget/dist/chat-widget.global.js"></script>
@@ -81,7 +110,7 @@ installed automatically.
 
 The IIFE bundle auto-registers the element on load.
 
-### 2. Programmatic — bundler / ESM
+### 3. Programmatic — bundler / ESM
 
 ```ts
 import { mountChatWidget } from '@smooai/chat-widget';
