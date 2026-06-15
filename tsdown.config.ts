@@ -44,4 +44,22 @@ export default defineConfig([
             entryFileNames: 'chat-widget.global.js',
         },
     },
+    // Tiny deferred loader IIFE — the *recommended* embed. Included eagerly, it
+    // lazily injects `chat-widget.global.js` only past the host's critical render
+    // (idle / user intent / 8s fallback), so the widget never competes with the
+    // host page's LCP/TBT. Imports nothing from the widget itself, so it stays a
+    // few hundred bytes.
+    {
+        entry: { 'chat-widget-loader': 'src/loader.ts' },
+        format: ['iife'],
+        platform: 'browser',
+        globalName: 'SmoothAgentChatLoader',
+        dts: false,
+        sourcemap: true,
+        clean: false,
+        outDir: 'dist',
+        outputOptions: {
+            entryFileNames: 'chat-widget-loader.global.js',
+        },
+    },
 ]);

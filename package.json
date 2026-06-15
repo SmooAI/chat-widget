@@ -38,7 +38,8 @@
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js"
         },
-        "./standalone": "./dist/chat-widget.global.js"
+        "./standalone": "./dist/chat-widget.global.js",
+        "./loader": "./dist/chat-widget-loader.global.js"
     },
     "files": [
         "dist",
@@ -48,7 +49,10 @@
     "sideEffects": [
         "**/standalone.ts",
         "**/standalone.js",
-        "**/chat-widget.global.js"
+        "**/chat-widget.global.js",
+        "**/loader.ts",
+        "**/loader.js",
+        "**/chat-widget-loader.global.js"
     ],
     "publishConfig": {
         "access": "public"
