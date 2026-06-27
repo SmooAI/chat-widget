@@ -91,6 +91,24 @@ export interface ChatWidgetConfig {
     /** Require the visitor's phone before chatting. */
     requirePhone?: boolean;
     /**
+     * Show the phone field on the pre-chat form (optional unless {@link requirePhone}).
+     * Defaults to `true` for this widget — phone rides the session metadata as
+     * `userPhone` so the agent can follow up by SMS. Set `false` to hide it.
+     */
+    collectPhone?: boolean;
+    /**
+     * Show the email + SMS marketing-consent checkboxes on the pre-chat form.
+     * Explicit opt-in, default UNCHECKED; a `consentAt` timestamp is stamped when
+     * a box is ticked. Defaults to `true`. The consent record is threaded into the
+     * session metadata (ADR-048).
+     */
+    collectConsent?: boolean;
+    /**
+     * Offer the cross-device "Restore my chats" affordance — an explicit link that
+     * runs the identity-OTP → resolve → replay flow. Defaults to `true`.
+     */
+    allowChatRestore?: boolean;
+    /**
      * Let visitors chat without providing any identity. When `true`, the
      * `require*` flags are ignored and the pre-chat form is skipped.
      */
@@ -135,6 +153,9 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         requireName: config.requireName ?? false,
         requireEmail: config.requireEmail ?? false,
         requirePhone: config.requirePhone ?? false,
+        collectPhone: config.collectPhone ?? true,
+        collectConsent: config.collectConsent ?? true,
+        allowChatRestore: config.allowChatRestore ?? true,
         allowAnonymous: config.allowAnonymous ?? false,
         theme: {
             text: theme.text ?? '#f8fafc',
