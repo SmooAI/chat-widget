@@ -10,6 +10,17 @@ const agentClientEntry = fileURLToPath(
     new URL('./node_modules/@smooai/smooth-operator/dist/client.js', import.meta.url),
 );
 
+// Explicit BROWSER transpile target for every output. Without this, tsdown
+// derives `node22.0.0` from the package `engines` — a *Node* target for what is
+// actually a browser `<script>`/ESM bundle. A Node target is the kind of setting
+// that can silently downlevel the protocol client's async generators / `for await`
+// over the streaming `MessageTurn` (`Symbol.asyncIterator`) into regenerator/helper
+// shims, which mangles the streamed chat turn in older or stricter engines. Pinning
+// an explicit `es2020` browser target keeps native async iteration intact (es2018+
+// has `for await` / async iterators) and matches what the ESM build emits, so the
+// IIFE global bundle and the ESM build stay byte-faithful on the streaming path.
+const browserTarget = 'es2020';
+
 export default defineConfig([
     // ESM library entry — for bundler-based hosts that `import` the widget and
     // call `defineChatWidget()` / `mountChatWidget(...)` programmatically. The
@@ -18,6 +29,7 @@ export default defineConfig([
         entry: { index: 'src/index.ts' },
         format: ['esm'],
         platform: 'browser',
+        target: browserTarget,
         dts: true,
         sourcemap: true,
         clean: true,
@@ -31,6 +43,7 @@ export default defineConfig([
         entry: { 'chat-widget': 'src/standalone.ts' },
         format: ['iife'],
         platform: 'browser',
+        target: browserTarget,
         globalName: 'SmoothAgentChat',
         deps: { alwaysBundle: [/@smooai\/smooth-operator/] },
         alias: {
@@ -53,6 +66,7 @@ export default defineConfig([
         entry: { 'chat-widget-loader': 'src/loader.ts' },
         format: ['iife'],
         platform: 'browser',
+        target: browserTarget,
         globalName: 'SmoothAgentChatLoader',
         dts: false,
         sourcemap: true,
