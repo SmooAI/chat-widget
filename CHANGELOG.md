@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+### Patch Changes
+
+- Build: pin an explicit `es2020` browser transpile target for all bundles (ESM + both IIFE globals) instead of letting tsdown derive a Node target (`node22.0.0`) from `engines`. A Node target is wrong for a browser `<script>`/ESM embed and is exactly the setting that can silently downlevel the smooth-operator protocol client's async generators / `for await` over the streaming `MessageTurn` (`Symbol.asyncIterator`) into regenerator/helper shims — which mangles the streamed chat turn in stricter engines. Pinning a browser target keeps native async iteration intact and keeps the IIFE global bundle byte-faithful to the ESM build on the streaming path. Verified end-to-end against the live prod operator (`wss://ai.smoo.ai/ws`) in headless Chromium: a full grounded turn streams and renders.
+
 ## 0.5.1
 
 ### Patch Changes
