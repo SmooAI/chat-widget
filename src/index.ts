@@ -33,6 +33,7 @@ export type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config
 export { initChatWidgetLoader } from './loader-core.js';
 export {
     ConversationController,
+    httpBaseFromWsEndpoint,
     type ChatMessage,
     type Citation,
     type ConnectionStatus,

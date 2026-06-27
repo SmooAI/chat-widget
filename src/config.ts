@@ -71,6 +71,13 @@ export interface ChatWidgetConfig {
     userEmail?: string;
     /** Optional phone number for the user participant (passed via session metadata). */
     userPhone?: string;
+    /**
+     * Optional pre-auth HMAC context. When the host page has a shared secret with
+     * the agent, it can sign `{ userId, signature, timestamp }` so the chat-ws
+     * wrapper's `/internal/*` identity routes (and the WS create path) verify the
+     * caller without an OTP round-trip (ADR-046/ADR-048). Passed through verbatim.
+     */
+    authContext?: { userId: string; signature: string; timestamp: number };
     /** Placeholder text for the message input. */
     placeholder?: string;
     /** Greeting rendered when the conversation opens (before any messages). */
@@ -120,11 +127,12 @@ export interface ChatWidgetConfig {
 /** The fully-resolved theme (canonical keys only — aliases are folded in). */
 export type ResolvedTheme = Required<Omit<ChatWidgetTheme, 'chatBubbleInbound' | 'chatBubbleInboundText' | 'chatBubbleOutbound' | 'chatBubbleOutboundText'>>;
 
-export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone'>> & {
+export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone' | 'authContext'>> & {
     theme: ResolvedTheme;
     userName?: string;
     userEmail?: string;
     userPhone?: string;
+    authContext?: { userId: string; signature: string; timestamp: number };
 };
 
 /** Resolve a partial config against the built-in defaults. */
@@ -145,6 +153,7 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         userName: config.userName,
         userEmail: config.userEmail,
         userPhone: config.userPhone,
+        authContext: config.authContext,
         placeholder: config.placeholder ?? 'Type a message…',
         greeting: config.greeting ?? 'Hi! How can I help you today?',
         connectionErrorMessage: config.connectionErrorMessage ?? "We couldn't reach the chat. Please try again in a moment.",

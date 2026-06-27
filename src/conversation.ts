@@ -18,101 +18,37 @@
  *   - `browserFingerprint` computed once + sent on every `create_conversation_session`.
  *   - identity + marketing consent threaded into the session `metadata`.
  *   - same-session RESUME on load (no engine change — `get_session` + `get_messages`).
- *   - cross-device "restore my chats" (`request_identity_otp` / `verify_identity_otp`
- *     / `resolve_identity`) sent as raw frames over a shared transport.
+ *   - returning-visitor RESUME via `POST /internal/resume-by-fingerprint`, and
+ *     cross-device "restore my chats" via the `POST /internal/identity/{request-otp,
+ *     verify-otp,resolve}` routes on the chat-ws wrapper. The engine (smooth-operator
+ *     1.8.0) owns the `/ws` dispatch and REJECTS unknown verbs, so these are HTTP
+ *     `fetch()` calls (origin-allowlisted + optional authContext, per ADR-046/048) —
+ *     NOT WS frames.
  *
  * The controller is UI-agnostic: it emits typed events and the view renders them.
  */
-import { type Citation, ProtocolError, type ServerEvent, SmoothAgentClient, type Transport, type TransportState } from '@smooai/smooth-operator';
+import { type Citation, ProtocolError, type ServerEvent, SmoothAgentClient } from '@smooai/smooth-operator';
 import type { StoreApi } from 'zustand/vanilla';
 import type { ChatWidgetConfig } from './config.js';
 import { getOrCreateFingerprint } from './fingerprint.js';
 import { type ConsentState, createWidgetStore, type WidgetStore } from './persistence.js';
 
 /**
- * A tiny browser `WebSocket` transport implementing the engine's {@link Transport}
- * contract. We inject our own (rather than letting the client build its default)
- * for two reasons: (1) it keeps a reference to `send()` so we can emit the custom
- * cross-device frames the engine client doesn't model, and (2) it sidesteps a
- * bundling quirk — the IIFE build aliases `@smooai/smooth-operator` to its
- * `client.js`, which imports but does not RE-export `WebSocketTransport`, so the
- * package's own transport isn't reachable from the global bundle. This class is a
- * faithful, minimal equivalent of `WebSocketTransport` over the global socket.
+ * Derive the HTTP base for the chat-ws wrapper's `/internal/*` REST routes from
+ * the WS endpoint:  `wss://ai.smoo.ai/ws` → `https://ai.smoo.ai`. The engine
+ * (smooth-operator 1.8.0) owns the `/ws` dispatch and REJECTS unknown verbs, so
+ * the cross-device identity flow + fingerprint resume are HTTP POST routes on the
+ * wrapper (origin-allowlisted + authContext, per ADR-046/ADR-048) — NOT WS frames.
  */
-class BrowserWebSocketTransport implements Transport {
-    private socket: WebSocket | null = null;
-    private readonly messageHandlers = new Set<(data: string) => void>();
-    private readonly closeHandlers = new Set<(info: { code?: number; reason?: string }) => void>();
-    private readonly errorHandlers = new Set<(err: unknown) => void>();
-
-    constructor(private readonly url: string) {}
-
-    get state(): TransportState {
-        const s = this.socket;
-        if (!s) return 'closed';
-        switch (s.readyState) {
-            case WebSocket.CONNECTING:
-                return 'connecting';
-            case WebSocket.OPEN:
-                return 'open';
-            case WebSocket.CLOSING:
-                return 'closing';
-            default:
-                return 'closed';
-        }
-    }
-
-    connect(): Promise<void> {
-        return new Promise((resolve, reject) => {
-            try {
-                const socket = new WebSocket(this.url);
-                this.socket = socket;
-                socket.addEventListener('open', () => resolve());
-                socket.addEventListener('error', (ev) => {
-                    for (const h of this.errorHandlers) h(ev);
-                    if (socket.readyState !== WebSocket.OPEN) reject(new Error('WebSocket connection failed'));
-                });
-                socket.addEventListener('message', (ev: MessageEvent) => {
-                    const data = typeof ev.data === 'string' ? ev.data : String(ev.data);
-                    for (const h of this.messageHandlers) h(data);
-                });
-                socket.addEventListener('close', (ev: CloseEvent) => {
-                    for (const h of this.closeHandlers) h({ code: ev.code, reason: ev.reason });
-                });
-            } catch (err) {
-                reject(err instanceof Error ? err : new Error(String(err)));
-            }
-        });
-    }
-
-    send(data: string): void {
-        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-            throw new Error('Transport is not open');
-        }
-        this.socket.send(data);
-    }
-
-    close(code?: number, reason?: string): void {
-        try {
-            this.socket?.close(code, reason);
-        } catch {
-            /* closing an already-closed socket is non-fatal */
-        }
-    }
-
-    onMessage(handler: (data: string) => void): () => void {
-        this.messageHandlers.add(handler);
-        return () => this.messageHandlers.delete(handler);
-    }
-
-    onClose(handler: (info: { code?: number; reason?: string }) => void): () => void {
-        this.closeHandlers.add(handler);
-        return () => this.closeHandlers.delete(handler);
-    }
-
-    onError(handler: (err: unknown) => void): () => void {
-        this.errorHandlers.add(handler);
-        return () => this.errorHandlers.delete(handler);
+export function httpBaseFromWsEndpoint(endpoint: string): string {
+    try {
+        const u = new URL(endpoint);
+        u.protocol = u.protocol === 'ws:' ? 'http:' : u.protocol === 'wss:' ? 'https:' : u.protocol;
+        // The REST routes live at the host root (`/internal/*`), not under `/ws`.
+        return `${u.protocol}//${u.host}`;
+    } catch {
+        // Best-effort string fallback for a non-absolute endpoint.
+        return endpoint.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/ws\/?$/, '');
     }
 }
 
@@ -177,13 +113,14 @@ export interface RestorableConversation {
 }
 
 /**
- * State machine for the cross-device "restore my chats" flow. Mirrors the
- * `request_identity_otp` → `verify_identity_otp` → `resolve_identity` verbs
- * (ADR-048 §c). The view renders a panel off this.
+ * State machine for the cross-device "restore my chats" flow. Driven by the three
+ * HTTP POST routes on the chat-ws wrapper — `/internal/identity/request-otp` →
+ * `/internal/identity/verify-otp` → `/internal/identity/resolve` (ADR-048 §c).
+ * The view renders a panel off this.
  */
 export type IdentityRestore =
     | { phase: 'idle' }
-    /** UI-local: the email-entry step before any frame is sent. */
+    /** UI-local: the email-entry step before any request is sent. */
     | { phase: 'awaiting_email'; error?: string }
     | { phase: 'requesting'; email: string; channel: 'email' | 'sms' }
     | { phase: 'awaiting_code'; email: string; channel: 'email' | 'sms'; maskedDestination?: string; error?: string; attemptsRemaining?: number }
@@ -262,8 +199,6 @@ export class ConversationController {
     private readonly events: ConversationEvents;
     private readonly store: StoreApi<WidgetStore>;
     private client: SmoothAgentClient | null = null;
-    /** Shared transport — kept so we can send the custom cross-device frames. */
-    private transport: BrowserWebSocketTransport | null = null;
     private sessionId: string | null = null;
     private readonly messages: ChatMessage[] = [];
     private status: ConnectionStatus = 'idle';
@@ -272,13 +207,13 @@ export class ConversationController {
     private activeRequestId: string | null = null;
     private interrupt: Interrupt | null = null;
     private identityRestore: IdentityRestore = { phase: 'idle' };
-    /** Pending cross-device verb resolvers, keyed by the requestId we minted. */
-    private readonly identityWaiters = new Map<string, (event: ServerEvent) => void>();
-    private unsubscribeEvents: (() => void) | null = null;
+    /** HTTP base for the chat-ws wrapper's `/internal/*` REST routes. */
+    private readonly httpBase: string;
 
     constructor(config: ChatWidgetConfig, events: ConversationEvents, store?: StoreApi<WidgetStore>) {
         this.config = config;
         this.events = events;
+        this.httpBase = httpBaseFromWsEndpoint(config.endpoint);
         this.store = store ?? createWidgetStore(config.agentId);
         // Seed identity from config into the persisted store (config wins on first
         // load; the persisted values survive across reloads thereafter).
@@ -397,23 +332,24 @@ export class ConversationController {
         return Object.keys(meta).length > 0 ? meta : undefined;
     }
 
-    /** Lazily open the shared transport + client. Idempotent within a connect. */
+    /** Lazily open the WS client (default transport). Idempotent within a connect. */
     private async ensureClient(): Promise<void> {
         if (this.client) return;
-        this.transport = new BrowserWebSocketTransport(this.config.endpoint);
-        this.client = new SmoothAgentClient({ url: this.config.endpoint, transport: this.transport });
-        // Route custom cross-device frames (and any unsolicited event) here.
-        this.unsubscribeEvents = this.client.onEvent((event) => this.handleUnsolicited(event));
+        this.client = new SmoothAgentClient({ url: this.config.endpoint });
         await this.client.connect();
     }
 
     /**
-     * Open the transport and either RESUME a persisted session or create a new one.
+     * Open the connection and either RESUME or create a session.
      *
-     * Resume (ADR-048 §b): if a persisted `sessionId` exists → `get_session`; when
-     * its `status !== 'ended'` we reuse it and hydrate the transcript from
-     * `get_messages` (newest-first page, reversed to chronological). On `ended`/404
-     * we clear ONLY the session pointer (identity/consent survive) and create fresh.
+     * 1. Persisted pointer (ADR-048 §b): `get_session` → if not `ended`, reuse +
+     *    hydrate from `get_messages` (newest-first, reversed). On ended/404 clear
+     *    ONLY the pointer (identity/consent survive).
+     * 2. No persisted pointer: POST `/internal/resume-by-fingerprint` FIRST; if
+     *    `resumable`, adopt the returned session (the wrapper has primed the
+     *    operator registry), reuse the sessionId, and hydrate via get_session/
+     *    get_messages — rather than relying on createConversationSession to resume.
+     * 3. Otherwise create a fresh session.
      */
     async connect(): Promise<void> {
         if (this.status === 'connecting' || this.status === 'ready') return;
@@ -429,6 +365,18 @@ export class ConversationController {
                 }
                 // Resume failed (ended/404/gone) — clear the pointer, keep identity.
                 this.store.getState().clearSession();
+            } else {
+                // Returning anonymous visitor with no stored pointer: ask the
+                // wrapper to resolve a recent session for this fingerprint.
+                const fpSessionId = await this.resumeByFingerprint();
+                if (fpSessionId) {
+                    const resumed = await this.tryResume(fpSessionId);
+                    if (resumed) {
+                        this.store.getState().setSessionId(fpSessionId);
+                        this.setStatus('ready');
+                        return;
+                    }
+                }
             }
             await this.createSession();
             this.setStatus('ready');
@@ -436,6 +384,61 @@ export class ConversationController {
             this.setStatus('error', err instanceof Error ? err.message : String(err));
             throw err;
         }
+    }
+
+    // ─────────────────────── chat-ws `/internal/*` HTTP ─────────────────────────
+
+    /**
+     * Build the auth fields every `/internal/*` route shares: `agentId` (required
+     * for the agent-policy lookup), `agentName` (used as the OTP email sender), and
+     * the optional pre-auth `authContext` the host page may have configured. The
+     * `Origin` header is sent automatically by the browser and checked server-side.
+     */
+    private authBody(): Record<string, unknown> {
+        const body: Record<string, unknown> = { agentId: this.config.agentId };
+        if (this.config.agentName) body.agentName = this.config.agentName;
+        if (this.config.authContext) body.authContext = this.config.authContext;
+        return body;
+    }
+
+    /** POST JSON to a `/internal/*` route; returns the parsed body (or throws). */
+    private async postInternal(path: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+        const res = await fetch(`${this.httpBase}${path}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            // Identity/origin checks are cookie- and Origin-based; send credentials
+            // so any session cookie the host set rides along.
+            credentials: 'include',
+            body: JSON.stringify({ ...this.authBody(), ...payload }),
+        });
+        let json: Record<string, unknown> = {};
+        try {
+            json = (await res.json()) as Record<string, unknown>;
+        } catch {
+            json = {};
+        }
+        if (!res.ok) {
+            const err = json.error as { code?: string; message?: string } | undefined;
+            throw new Error(err?.message ?? `${path} failed (${res.status})`);
+        }
+        return json;
+    }
+
+    /**
+     * POST `/internal/resume-by-fingerprint`. Returns the resumable sessionId when
+     * the wrapper found (and primed) a recent session for this fingerprint, else
+     * null. Network/route failures are swallowed → null (fall through to create).
+     */
+    private async resumeByFingerprint(): Promise<string | null> {
+        try {
+            const json = await this.postInternal('/internal/resume-by-fingerprint', { browserFingerprint: this.fingerprint() });
+            if (json.resumable === true && typeof json.sessionId === 'string') {
+                return json.sessionId;
+            }
+        } catch {
+            // Resume is best-effort; any failure just means a fresh session.
+        }
+        return null;
     }
 
     /** `create_conversation_session` with fingerprint + identity + consent metadata. */
@@ -606,89 +609,72 @@ export class ConversationController {
     }
 
     // ─────────────────── Cross-device "restore my chats" (§c) ───────────────────
+    //
+    // Three HTTP POST routes on the chat-ws wrapper (the engine `/ws` dispatch
+    // rejects unknown verbs): request-otp → verify-otp → resolve. verify-otp and
+    // resolve are session-scoped — they require a live `sessionId` (a uuid), which
+    // is guaranteed because the widget connects (creating/resuming a session)
+    // before exposing the restore affordance.
 
     /**
-     * Send a raw frame over the shared transport for a custom verb the engine
-     * client doesn't model (`request_identity_otp` etc.), then route the matching
-     * response back via {@link handleUnsolicited}. Returns the minted requestId.
+     * Begin the cross-device restore: POST `/internal/identity/request-otp` for
+     * `email` over `channel`. The view collects the email via an explicit affordance.
      */
-    private sendIdentityFrame(action: string, payload: Record<string, unknown>, onReply: (event: ServerEvent) => void): string {
-        const requestId = this.nextId('idreq');
-        this.identityWaiters.set(requestId, onReply);
-        this.transport?.send(JSON.stringify({ action, requestId, ...payload }));
-        return requestId;
-    }
-
-    /** Read a field from either the flat event or its nested `data` / `data.data`. */
-    private static readField(event: ServerEvent, key: string): unknown {
-        const top = (event as unknown as Record<string, unknown>)[key];
-        if (top !== undefined) return top;
-        const data = (event as { data?: { data?: Record<string, unknown>; [k: string]: unknown } }).data;
-        if (data) {
-            if (data[key] !== undefined) return data[key];
-            if (data.data && data.data[key] !== undefined) return data.data[key];
-        }
-        return undefined;
-    }
-
-    /**
-     * Begin the cross-device restore: request an OTP to `email` over `channel`.
-     * The view should already have collected the email via an explicit affordance.
-     */
-    requestIdentityOtp(email: string, channel: 'email' | 'sms' = 'email'): void {
+    async requestIdentityOtp(email: string, channel: 'email' | 'sms' = 'email'): Promise<void> {
         const trimmed = email.trim();
-        if (!trimmed || !this.transport) return;
+        if (!trimmed) return;
         this.setIdentityRestore({ phase: 'requesting', email: trimmed, channel });
-        this.sendIdentityFrame('request_identity_otp', { sessionId: this.sessionId ?? null, email: trimmed, channel }, (event) => {
-            if (event.type === 'otp_sent') {
-                const masked = ConversationController.readField(event, 'maskedDestination');
-                this.setIdentityRestore({ phase: 'awaiting_code', email: trimmed, channel, maskedDestination: typeof masked === 'string' ? masked : undefined });
-            } else if (event.type === 'error') {
-                const msg = ConversationController.readField(event, 'message');
-                this.setIdentityRestore({ phase: 'error', message: typeof msg === 'string' ? msg : 'Could not send a verification code.' });
-            }
-        });
+        try {
+            const json = await this.postInternal('/internal/identity/request-otp', {
+                ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+                email: trimmed,
+                channel,
+            });
+            const masked = typeof json.maskedDestination === 'string' ? json.maskedDestination : undefined;
+            this.setIdentityRestore({ phase: 'awaiting_code', email: trimmed, channel, maskedDestination: masked });
+        } catch (err) {
+            this.setIdentityRestore({ phase: 'error', message: err instanceof Error ? err.message : 'Could not send a verification code.' });
+        }
     }
 
-    /** Submit the code for the cross-device restore. */
-    verifyIdentityOtp(code: string): void {
+    /** Submit the code: POST `/internal/identity/verify-otp`, then resolve on success. */
+    async verifyIdentityOtp(code: string): Promise<void> {
         const state = this.identityRestore;
         const trimmed = code.trim();
-        if (!trimmed || !this.transport) return;
-        if (state.phase !== 'awaiting_code') return;
+        if (!trimmed || state.phase !== 'awaiting_code') return;
         const { email, channel } = state;
+        if (!this.sessionId) {
+            this.setIdentityRestore({ phase: 'error', message: 'No active session to verify against.' });
+            return;
+        }
         this.setIdentityRestore({ phase: 'verifying', email, channel });
-        this.sendIdentityFrame('verify_identity_otp', { sessionId: this.sessionId ?? null, email, code: trimmed }, (event) => {
-            if (event.type === 'otp_verified') {
+        try {
+            const json = await this.postInternal('/internal/identity/verify-otp', { sessionId: this.sessionId, email, code: trimmed });
+            if (json.event === 'otp_verified') {
                 this.store.getState().setVerifiedEmail(email);
-                this.resolveIdentity(email);
-            } else if (event.type === 'otp_invalid') {
-                const remaining = ConversationController.readField(event, 'attemptsRemaining');
-                this.setIdentityRestore({
-                    phase: 'awaiting_code',
-                    email,
-                    channel,
-                    error: 'That code was incorrect.',
-                    attemptsRemaining: typeof remaining === 'number' ? remaining : undefined,
-                });
-            } else if (event.type === 'error') {
-                const msg = ConversationController.readField(event, 'message');
-                this.setIdentityRestore({ phase: 'error', message: typeof msg === 'string' ? msg : 'Verification failed.' });
+                await this.resolveIdentity(email);
+            } else if (json.event === 'otp_invalid') {
+                const remaining = typeof json.attemptsRemaining === 'number' ? json.attemptsRemaining : undefined;
+                this.setIdentityRestore({ phase: 'awaiting_code', email, channel, error: 'That code was incorrect.', attemptsRemaining: remaining });
+            } else {
+                this.setIdentityRestore({ phase: 'error', message: 'Verification failed.' });
             }
-        });
+        } catch (err) {
+            this.setIdentityRestore({ phase: 'error', message: err instanceof Error ? err.message : 'Verification failed.' });
+        }
     }
 
-    /** Resolve the verified identity → list of restorable conversations. */
-    private resolveIdentity(email: string): void {
-        if (!this.transport) return;
+    /** Resolve the verified identity → restorable conversations via POST `/internal/identity/resolve`. */
+    private async resolveIdentity(email: string): Promise<void> {
+        if (!this.sessionId) return;
         this.setIdentityRestore({ phase: 'resolving', email });
-        this.sendIdentityFrame('resolve_identity', { sessionId: this.sessionId ?? null, email }, (event) => {
-            const resolved = ConversationController.readField(event, 'resolved');
-            if (resolved === false) {
+        try {
+            const json = await this.postInternal('/internal/identity/resolve', { sessionId: this.sessionId, email });
+            if (json.resolved !== true) {
                 this.setIdentityRestore({ phase: 'resolved', email, conversations: [] });
                 return;
             }
-            const raw = ConversationController.readField(event, 'conversations');
+            const raw = json.conversations;
             const conversations: RestorableConversation[] = Array.isArray(raw)
                 ? raw
                       .map((c): RestorableConversation | null => {
@@ -707,13 +693,15 @@ export class ConversationController {
                       .filter((c): c is RestorableConversation => c !== null)
                 : [];
             this.setIdentityRestore({ phase: 'resolved', email, conversations });
-        });
+        } catch (err) {
+            this.setIdentityRestore({ phase: 'error', message: err instanceof Error ? err.message : 'Could not load your chats.' });
+        }
     }
 
     /**
      * Replay a chosen restorable conversation: point the live session at its
-     * sessionId, hydrate its transcript, and persist the new pointer so the next
-     * `sendMessage` continues it.
+     * sessionId, hydrate its transcript (get_session + get_messages), and persist
+     * the new pointer so the next `sendMessage` continues it.
      */
     async restoreConversation(sessionId: string): Promise<void> {
         if (!this.client) await this.ensureClient();
@@ -732,32 +720,10 @@ export class ConversationController {
         this.setIdentityRestore({ phase: 'idle' });
     }
 
-    /**
-     * Route an unsolicited / custom-verb frame to its waiting handler. The engine
-     * client surfaces every frame it can't correlate to a pending request or turn
-     * here; we match by the echoed `requestId` of our identity frames.
-     */
-    private handleUnsolicited(event: ServerEvent): void {
-        const requestId = (event as { requestId?: string }).requestId ?? (event as { data?: { requestId?: string } }).data?.requestId;
-        if (typeof requestId === 'string' && this.identityWaiters.has(requestId)) {
-            const handler = this.identityWaiters.get(requestId);
-            // otp_invalid / otp_sent keep the flow alive (retry / interim ack);
-            // other terminals end it, so drop the waiter.
-            if (event.type !== 'otp_invalid' && event.type !== 'otp_sent') {
-                this.identityWaiters.delete(requestId);
-            }
-            handler?.(event);
-        }
-    }
-
     /** Tear down the underlying client. */
     disconnect(): void {
-        this.unsubscribeEvents?.();
-        this.unsubscribeEvents = null;
-        this.identityWaiters.clear();
         this.client?.disconnect('widget closed');
         this.client = null;
-        this.transport = null;
         this.sessionId = null;
         this.activeRequestId = null;
         this.setInterrupt(null);

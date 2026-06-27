@@ -1,18 +1,23 @@
 /**
  * ConversationController integration tests (jsdom + a deterministic mock
- * WebSocket). The controller builds its own browser transport over the global
- * `WebSocket`, so we install a scriptable mock that captures outbound frames and
- * replays operator-shaped responses correlated by `requestId`.
+ * WebSocket + a mocked `fetch`).
  *
- * These cover the 0.7.0 identity / persistence / consent contract (ADR-048):
+ * The engine WS verbs (create/send/get_session/get_conversation_messages) are
+ * exercised through a scriptable mock WebSocket. The 0.7.0 cross-device identity
+ * flow + fingerprint resume are HTTP POST routes on the chat-ws wrapper (the
+ * engine `/ws` rejects unknown verbs — ADR-048), so those are exercised through a
+ * mocked `fetch` that routes by `/internal/*` path.
+ *
+ * Coverage:
  *   - createConversationSession carries browserFingerprint + identity + consent
  *     + phone-on-metadata,
  *   - same-session resume hydrates history and reuses the sessionId,
  *   - an ended session clears the pointer and starts fresh,
- *   - the cross-device request → verify → resolve → replay flow.
+ *   - fingerprint resume (POST /internal/resume-by-fingerprint) adopts a session,
+ *   - cross-device request → verify → resolve → replay over the HTTP routes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ConversationController, type ConversationEvents, type IdentityRestore } from './conversation.js';
+import { ConversationController, type ConversationEvents, httpBaseFromWsEndpoint, type IdentityRestore } from './conversation.js';
 import { createWidgetStore } from './persistence.js';
 
 const ENDPOINT = 'wss://example.test/ws';
@@ -87,6 +92,33 @@ function defaultOnFrame(frame: Record<string, unknown>, reply: (obj: unknown) =>
     }
 }
 
+// --- mocked fetch for the chat-ws `/internal/*` routes -----------------------
+
+interface FetchCall {
+    path: string;
+    body: Record<string, unknown>;
+    origin: string;
+}
+const fetchCalls: FetchCall[] = [];
+/** Per-test responder: path → JSON body (+ optional status). Default = resume:false. */
+let fetchRouter: (path: string, body: Record<string, unknown>) => { status?: number; json: Record<string, unknown> } = () => ({ json: { resumable: false } });
+
+function installMockFetch(): void {
+    fetchCalls.length = 0;
+    fetchRouter = () => ({ json: { resumable: false } });
+    (globalThis as unknown as { fetch: unknown }).fetch = async (url: string, init?: { body?: string }) => {
+        const u = new URL(url);
+        const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+        fetchCalls.push({ path: u.pathname, body, origin: u.origin });
+        const { status = 200, json } = fetchRouter(u.pathname, body);
+        return {
+            ok: status >= 200 && status < 300,
+            status,
+            json: async () => json,
+        };
+    };
+}
+
 function makeController(events: Partial<ConversationEvents> = {}, config: Record<string, unknown> = {}) {
     const store = createWidgetStore(AGENT);
     const onMessages = vi.fn();
@@ -107,6 +139,7 @@ describe('ConversationController — session creation (ADR-048 §a)', () => {
     beforeEach(() => {
         localStorage.clear();
         installMockWs();
+        installMockFetch();
         MockSocket.onFrame = defaultOnFrame;
     });
     afterEach(() => localStorage.clear());
@@ -170,6 +203,7 @@ describe('ConversationController — same-session resume (ADR-048 §b)', () => {
     beforeEach(() => {
         localStorage.clear();
         installMockWs();
+        installMockFetch();
     });
     afterEach(() => localStorage.clear());
 
@@ -267,36 +301,84 @@ describe('ConversationController — same-session resume (ADR-048 §b)', () => {
     });
 });
 
-describe('ConversationController — cross-device restore (ADR-048 §c)', () => {
+describe('httpBaseFromWsEndpoint', () => {
+    it('derives the HTTP base from a wss /ws endpoint', () => {
+        expect(httpBaseFromWsEndpoint('wss://ai.smoo.ai/ws')).toBe('https://ai.smoo.ai');
+        expect(httpBaseFromWsEndpoint('ws://localhost:8787/ws')).toBe('http://localhost:8787');
+        expect(httpBaseFromWsEndpoint('wss://ai.smoo.ai:9000/ws')).toBe('https://ai.smoo.ai:9000');
+    });
+});
+
+describe('ConversationController — fingerprint resume (ADR-048 §b, HTTP)', () => {
     beforeEach(() => {
         localStorage.clear();
         installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
     });
     afterEach(() => localStorage.clear());
 
-    it('runs request → verify → resolve → replay and persists verifiedEmail', async () => {
+    it('POSTs /internal/resume-by-fingerprint FIRST when there is no persisted pointer, then adopts the session', async () => {
+        // Wrapper resolves a recent session for this fingerprint and primes the registry.
+        fetchRouter = (path) => {
+            if (path === '/internal/resume-by-fingerprint') {
+                return { json: { resumable: true, sessionId: 'sess-FP', conversationId: 'c', agentId: AGENT } };
+            }
+            return { json: {} };
+        };
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status: 'active', agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { messages: [{ id: 'fp1', direction: 'outbound', content: { text: 'Welcome back' }, createdAt: '2026-01-01T00:00:00Z' }], hasMore: false } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+
+        const { controller, store, onMessages } = makeController();
+        await controller.connect();
+
+        // The fingerprint resume route was hit with the persisted fingerprint + agentId.
+        const fpCall = fetchCalls.find((c) => c.path === '/internal/resume-by-fingerprint');
+        expect(fpCall).toBeTruthy();
+        expect(fpCall?.body.browserFingerprint).toBe(store.getState().browserFingerprint);
+        expect(fpCall?.body.agentId).toBe(AGENT);
+
+        // Adopted the session via get_session/get_messages — NOT createConversationSession.
+        expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeUndefined();
+        expect(store.getState().sessionId).toBe('sess-FP');
+        const snap = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string }>;
+        expect(snap.some((m) => m.text === 'Welcome back')).toBe(true);
+    });
+
+    it('falls through to createConversationSession when the fingerprint is not resumable', async () => {
+        fetchRouter = () => ({ json: { resumable: false } });
+        const { controller, store } = makeController();
+        await controller.connect();
+        expect(fetchCalls.some((c) => c.path === '/internal/resume-by-fingerprint')).toBe(true);
+        expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeTruthy();
+        expect(store.getState().sessionId).toBe('sess-new');
+    });
+});
+
+describe('ConversationController — cross-device restore (ADR-048 §c, HTTP)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+    });
+    afterEach(() => localStorage.clear());
+
+    it('runs request → verify → resolve → replay over the HTTP routes and persists verifiedEmail', async () => {
         const restoreStates: IdentityRestore[] = [];
+        // A live session must exist before the cross-device affordance — create one.
         MockSocket.onFrame = (frame, reply) => {
             const requestId = frame.requestId;
             switch (frame.action) {
                 case 'create_conversation_session':
                     reply({ type: 'immediate_response', requestId, status: 202, data: { sessionId: 'sess-new', conversationId: 'c', agentId: AGENT } });
-                    break;
-                case 'request_identity_otp':
-                    expect(frame.email).toBe('ada@example.com');
-                    reply({ type: 'otp_sent', requestId, data: { requestId, data: { channel: 'email', maskedDestination: 'a***@example.com' } } });
-                    break;
-                case 'verify_identity_otp':
-                    expect(frame.code).toBe('123456');
-                    reply({ type: 'otp_verified', requestId, data: { requestId, data: { message: 'ok' } } });
-                    break;
-                case 'resolve_identity':
-                    reply({
-                        type: 'immediate_response',
-                        requestId,
-                        status: 200,
-                        data: { resolved: true, crmContactId: 'crm-1', conversations: [{ conversationId: 'conv-9', sessionId: 'sess-9', lastActivityAt: '2026-01-01T00:00:00Z', preview: 'Past chat' }] },
-                    });
                     break;
                 case 'get_session':
                     reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status: 'active', agentId: AGENT } });
@@ -308,15 +390,33 @@ describe('ConversationController — cross-device restore (ADR-048 §c)', () => 
                     break;
             }
         };
+        fetchRouter = (path, body) => {
+            switch (path) {
+                case '/internal/resume-by-fingerprint':
+                    return { json: { resumable: false } };
+                case '/internal/identity/request-otp':
+                    expect(body.email).toBe('ada@example.com');
+                    expect(body.agentId).toBe(AGENT);
+                    return { json: { event: 'otp_sent', maskedDestination: 'a***@example.com' } };
+                case '/internal/identity/verify-otp':
+                    expect(body.sessionId).toBe('sess-new');
+                    expect(body.code).toBe('123456');
+                    return { json: { event: 'otp_verified' } };
+                case '/internal/identity/resolve':
+                    expect(body.sessionId).toBe('sess-new');
+                    return { json: { resolved: true, crmContactId: 'crm-1', conversations: [{ conversationId: 'conv-9', sessionId: 'sess-9', lastActivityAt: '2026-01-01T00:00:00Z', preview: 'Past chat' }] } };
+                default:
+                    return { json: {} };
+            }
+        };
 
         const { controller, store, onMessages } = makeController({ onIdentityRestore: (s) => restoreStates.push(s) });
         await controller.connect();
 
-        controller.requestIdentityOtp('ada@example.com', 'email');
-        await tick();
+        await controller.requestIdentityOtp('ada@example.com', 'email');
         expect(restoreStates.at(-1)?.phase).toBe('awaiting_code');
 
-        controller.verifyIdentityOtp('123456');
+        await controller.verifyIdentityOtp('123456');
         await tick();
         // verifiedEmail persisted on success.
         expect(store.getState().verifiedEmail).toBe('ada@example.com');
@@ -334,24 +434,37 @@ describe('ConversationController — cross-device restore (ADR-048 §c)', () => 
 
     it('surfaces otp_invalid with attemptsRemaining and stays on the code step', async () => {
         const restoreStates: IdentityRestore[] = [];
-        MockSocket.onFrame = (frame, reply) => {
-            const requestId = frame.requestId;
-            if (frame.action === 'create_conversation_session') {
-                reply({ type: 'immediate_response', requestId, status: 202, data: { sessionId: 'sess-new', conversationId: 'c', agentId: AGENT } });
-            } else if (frame.action === 'request_identity_otp') {
-                reply({ type: 'otp_sent', requestId, data: { requestId, data: { channel: 'email', maskedDestination: 'a***@x.com' } } });
-            } else if (frame.action === 'verify_identity_otp') {
-                reply({ type: 'otp_invalid', requestId, data: { requestId, data: { error: 'INVALID_CODE', attemptsRemaining: 2, message: 'nope' } } });
+        MockSocket.onFrame = defaultOnFrame;
+        fetchRouter = (path) => {
+            switch (path) {
+                case '/internal/resume-by-fingerprint':
+                    return { json: { resumable: false } };
+                case '/internal/identity/request-otp':
+                    return { json: { event: 'otp_sent', maskedDestination: 'a***@x.com' } };
+                case '/internal/identity/verify-otp':
+                    return { json: { event: 'otp_invalid', attemptsRemaining: 2 } };
+                default:
+                    return { json: {} };
             }
         };
         const { controller } = makeController({ onIdentityRestore: (s) => restoreStates.push(s) });
         await controller.connect();
-        controller.requestIdentityOtp('ada@example.com');
-        await tick();
-        controller.verifyIdentityOtp('000000');
+        await controller.requestIdentityOtp('ada@example.com');
+        await controller.verifyIdentityOtp('000000');
         await tick();
         const last = restoreStates.at(-1);
         expect(last?.phase).toBe('awaiting_code');
         expect(last?.phase === 'awaiting_code' ? last.attemptsRemaining : null).toBe(2);
+    });
+
+    it('passes authContext through to the identity routes when configured', async () => {
+        MockSocket.onFrame = defaultOnFrame;
+        fetchRouter = () => ({ json: { resumable: false } });
+        const ac = { userId: 'u1', signature: 'sig', timestamp: 123 };
+        const { controller } = makeController({}, { authContext: ac });
+        await controller.connect();
+        await controller.requestIdentityOtp('ada@example.com');
+        const otpCall = fetchCalls.find((c) => c.path === '/internal/identity/request-otp');
+        expect(otpCall?.body.authContext).toEqual(ac);
     });
 });

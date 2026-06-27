@@ -172,6 +172,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             userName: this.overrides.userName,
             userEmail: this.overrides.userEmail,
             userPhone: this.overrides.userPhone,
+            authContext: this.overrides.authContext,
             placeholder: this.overrides.placeholder ?? this.getAttribute('placeholder') ?? undefined,
             greeting: this.overrides.greeting ?? this.getAttribute('greeting') ?? undefined,
             connectionErrorMessage: this.overrides.connectionErrorMessage,
@@ -180,6 +181,9 @@ export class SmoothAgentChatElement extends HTMLElement {
             requireName: this.overrides.requireName,
             requireEmail: this.overrides.requireEmail,
             requirePhone: this.overrides.requirePhone,
+            collectPhone: this.overrides.collectPhone,
+            collectConsent: this.overrides.collectConsent,
+            allowChatRestore: this.overrides.allowChatRestore,
             allowAnonymous: this.overrides.allowAnonymous,
             theme,
         };
@@ -519,7 +523,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             input.placeholder = 'you@example.com';
             const go = () => {
                 const email = input.value.trim();
-                if (email) this.controller?.requestIdentityOtp(email, 'email');
+                if (email) void this.controller?.requestIdentityOtp(email, 'email');
             };
             input.addEventListener('keydown', (ev) => {
                 if (ev.key === 'Enter') {
@@ -563,7 +567,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             input.placeholder = 'Enter code';
             const submit = () => {
                 const code = input.value.trim();
-                if (code) this.controller?.verifyIdentityOtp(code);
+                if (code) void this.controller?.verifyIdentityOtp(code);
             };
             input.addEventListener('keydown', (ev) => {
                 if (ev.key === 'Enter') {

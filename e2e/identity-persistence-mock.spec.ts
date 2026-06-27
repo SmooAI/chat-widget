@@ -25,12 +25,15 @@ const AGENT_ID = '2590dfd6-7ed5-484b-bfb4-6d83a97d5a8e';
 const ENDPOINT = 'wss://ai.smoo.ai/ws';
 
 /**
- * The mock WebSocket. Its `send` records frames on window.__sent and routes by
- * action through a window.__script(frame, reply) hook the test can swap per case.
+ * The mock WebSocket (records WS frames on window.__sent, routes via
+ * window.__script) PLUS a mocked fetch for the chat-ws `/internal/*` routes
+ * (records calls on window.__http, routes via window.__httpScript(path, body) →
+ * { status?, json }; default = resume:false).
  */
 const MOCK_WS = `
 (() => {
   window.__sent = [];
+  window.__http = [];
   class MockWS {
     constructor(url) {
       this.url = url; this.readyState = 0;
@@ -50,6 +53,15 @@ const MOCK_WS = `
   }
   MockWS.CONNECTING=0; MockWS.OPEN=1; MockWS.CLOSING=2; MockWS.CLOSED=3;
   window.WebSocket = MockWS;
+
+  window.fetch = async (url, init) => {
+    const u = new URL(url, location.href);
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    window.__http.push({ path: u.pathname, body });
+    const route = (window.__httpScript || (() => ({ json: { resumable: false } })));
+    const { status = 200, json = {} } = route(u.pathname, body) || {};
+    return { ok: status >= 200 && status < 300, status, json: async () => json };
+  };
 })();
 `;
 
@@ -278,19 +290,11 @@ test('cross-device restore: request → verify → resolve → replay', async ({
             } catch {
                 /* ignore */
             }
+            // WS verbs: create the live session + serve the replayed history.
             (window as unknown as { __script: unknown }).__script = (f: Record<string, unknown>, reply: (o: unknown) => void) => {
                 switch (f.action) {
                     case 'create_conversation_session':
                         reply({ type: 'immediate_response', requestId: f.requestId, status: 202, data: { sessionId: 'sess-A', conversationId: 'c', agentId: f.agentId } });
-                        break;
-                    case 'request_identity_otp':
-                        reply({ type: 'otp_sent', requestId: f.requestId, data: { requestId: f.requestId, data: { channel: 'email', maskedDestination: 'a***@example.com' } } });
-                        break;
-                    case 'verify_identity_otp':
-                        reply({ type: 'otp_verified', requestId: f.requestId, data: { requestId: f.requestId, data: { message: 'ok' } } });
-                        break;
-                    case 'resolve_identity':
-                        reply({ type: 'immediate_response', requestId: f.requestId, status: 200, data: { resolved: true, crmContactId: 'crm', conversations: [{ conversationId: 'conv-9', sessionId: 'sess-9', lastActivityAt: '2026-01-01T00:00:00Z', preview: 'Past chat about pricing' }] } });
                         break;
                     case 'get_session':
                         reply({ type: 'immediate_response', requestId: f.requestId, status: 200, data: { sessionId: f.sessionId, status: 'active', agentId } });
@@ -298,6 +302,21 @@ test('cross-device restore: request → verify → resolve → replay', async ({
                     case 'get_conversation_messages':
                         reply({ type: 'immediate_response', requestId: f.requestId, status: 200, data: { messages: [{ id: 'h1', direction: 'inbound', content: { text: 'Replayed pricing chat' }, createdAt: '2026-01-01T00:00:00Z' }], hasMore: false } });
                         break;
+                }
+            };
+            // HTTP /internal/* routes: the cross-device identity flow.
+            (window as unknown as { __httpScript: unknown }).__httpScript = (path: string, body: Record<string, unknown>) => {
+                switch (path) {
+                    case '/internal/resume-by-fingerprint':
+                        return { json: { resumable: false } };
+                    case '/internal/identity/request-otp':
+                        return { json: { event: 'otp_sent', maskedDestination: 'a***@example.com' } };
+                    case '/internal/identity/verify-otp':
+                        return { json: body.code === '123456' ? { event: 'otp_verified' } : { event: 'otp_invalid', attemptsRemaining: 2 } };
+                    case '/internal/identity/resolve':
+                        return { json: { resolved: true, crmContactId: 'crm', conversations: [{ conversationId: 'conv-9', sessionId: 'sess-9', lastActivityAt: '2026-01-01T00:00:00Z', preview: 'Past chat about pricing' }] } };
+                    default:
+                        return { json: {} };
                 }
             };
             // @ts-expect-error injected global
@@ -338,4 +357,66 @@ test('cross-device restore: request → verify → resolve → replay', async ({
     expect(result.hadList, 'resolve_identity produced a conversation list').toBe(true);
     expect(result.verifiedEmailPersisted, 'verifiedEmail persisted after verify').toBe('ada@example.com');
     expect(result.replayed).toContain('Replayed pricing chat');
+});
+
+test('fingerprint resume: no persisted pointer → POST /internal/resume-by-fingerprint → adopt + replay', async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e) => pageErrors.push(`${e.name}: ${e.message}`));
+
+    await page.addInitScript(MOCK_WS);
+    await page.goto(`http://127.0.0.1:${process.env.STATIC_PORT ?? 4830}/e2e/fixtures/demo.html`).catch(async () => {
+        await page.goto('about:blank');
+    });
+    await page.addScriptTag({ content: GLOBAL_BUNDLE });
+
+    const result = await page.evaluate(
+        async ({ endpoint, agentId }) => {
+            const s = (ms: number) => new Promise((r) => setTimeout(r, ms));
+            try {
+                localStorage.clear();
+            } catch {
+                /* ignore */
+            }
+            // No persisted pointer. The wrapper resolves a recent session for this
+            // fingerprint and primes the registry; the widget adopts it.
+            (window as unknown as { __httpScript: unknown }).__httpScript = (path: string) => {
+                if (path === '/internal/resume-by-fingerprint') {
+                    return { json: { resumable: true, sessionId: 'sess-FP', conversationId: 'c', agentId } };
+                }
+                return { json: {} };
+            };
+            (window as unknown as { __script: unknown }).__script = (f: Record<string, unknown>, reply: (o: unknown) => void) => {
+                if (f.action === 'get_session') reply({ type: 'immediate_response', requestId: f.requestId, status: 200, data: { sessionId: f.sessionId, status: 'active', agentId } });
+                else if (f.action === 'get_conversation_messages') reply({ type: 'immediate_response', requestId: f.requestId, status: 200, data: { messages: [{ id: 'fp1', direction: 'outbound', content: { text: 'Welcome back' }, createdAt: '2026-01-01T00:00:00Z' }], hasMore: false } });
+                else if (f.action === 'create_conversation_session') reply({ type: 'immediate_response', requestId: f.requestId, status: 202, data: { sessionId: 'sess-SHOULD-NOT-HAPPEN', conversationId: 'c', agentId: f.agentId } });
+            };
+            // @ts-expect-error injected global
+            const el = window.SmoothAgentChat.mount({ endpoint, agentId, greeting: '' });
+            const root = (el as { shadowRoot: ShadowRoot }).shadowRoot;
+            (root.querySelector('.launcher') as HTMLElement | null)?.click();
+            for (let i = 0; i < 80; i++) {
+                const txt = Array.from(root.querySelectorAll('.bubble')).map((b) => b.textContent ?? '').join(' ');
+                if (/Welcome back/.test(txt)) break;
+                await s(25);
+            }
+            const sent = (window as unknown as { __sent: Record<string, unknown>[] }).__sent;
+            const http = (window as unknown as { __http: { path: string; body: Record<string, unknown> }[] }).__http;
+            return {
+                hitFingerprintRoute: http.some((h) => h.path === '/internal/resume-by-fingerprint'),
+                fingerprintSent: http.find((h) => h.path === '/internal/resume-by-fingerprint')?.body.browserFingerprint,
+                createdSession: sent.some((x) => x.action === 'create_conversation_session'),
+                persistedSession: JSON.parse(localStorage.getItem(`smoo-chat-widget:${agentId}`) ?? '{}').state?.sessionId,
+                replayed: Array.from(root.querySelectorAll('.bubble')).map((b) => b.textContent ?? '').join(' '),
+            };
+        },
+        { endpoint: ENDPOINT, agentId: AGENT_ID },
+    );
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+    expect(result.hitFingerprintRoute, 'POST /internal/resume-by-fingerprint was called').toBe(true);
+    expect(typeof result.fingerprintSent).toBe('string');
+    // Adopted the resumed session — did NOT create a fresh one.
+    expect(result.createdSession, 'must NOT create a session when fingerprint resumes').toBe(false);
+    expect(result.persistedSession).toBe('sess-FP');
+    expect(result.replayed).toContain('Welcome back');
 });
