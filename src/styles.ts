@@ -327,6 +327,50 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
 }
 @keyframes sac-blink { to { opacity: 0 } }
 
+/* ─────────────── Rendered markdown (assistant bubbles / snippets) ─────────── */
+/* The renderer (markdown.ts) emits a small allowlisted set of tags; these rules
+   keep them legible inside the tight Aurora-Glass bubble + citation card. */
+/* Block-level markdown drives its own spacing/wrapping, so opt out of the
+   bubble's pre-wrap (which would otherwise add stray blank lines). */
+.bubble.md { white-space: normal; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 8px; }
+.md ul, .md ol { margin: 6px 0 8px; padding-left: 20px; }
+.md li { margin: 2px 0; }
+.md li::marker { color: color-mix(in srgb, var(--sac-primary) 75%, transparent); }
+.md a {
+    color: color-mix(in srgb, var(--sac-primary) 92%, #fff);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    word-break: break-word;
+}
+.md a:hover { text-decoration: none; }
+.md strong { font-weight: 700; }
+.md em { font-style: italic; }
+.md code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .9em;
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--sac-text) 10%, transparent);
+}
+.md pre {
+    margin: 6px 0 8px;
+    padding: 9px 11px;
+    border-radius: 9px;
+    overflow-x: auto;
+    background: color-mix(in srgb, var(--sac-text) 9%, transparent);
+    border: 1px solid color-mix(in srgb, var(--sac-text) 8%, transparent);
+}
+.md pre code { padding: 0; background: none; font-size: 12px; line-height: 1.45; }
+.md blockquote {
+    margin: 6px 0;
+    padding: 2px 0 2px 11px;
+    border-left: 2px solid color-mix(in srgb, var(--sac-primary) 55%, transparent);
+    color: color-mix(in srgb, var(--sac-text) 78%, transparent);
+}
+
 /* Full-page: center the conversation in a readable column. */
 .panel.fullpage .messages { padding: 26px 20px; }
 .panel.fullpage .row { max-width: 760px; width: 100%; margin-left: auto; margin-right: auto; }
