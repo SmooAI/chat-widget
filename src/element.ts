@@ -18,6 +18,7 @@ import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config
 import { needsUserInfo, resolveConfig } from './config.js';
 import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type Interrupt } from './conversation.js';
 import { SMOOTH_LOGO_SVG } from './logo.js';
+import { cleanCitationSnippet, escapeHtml, renderMarkdown, safeHttpUrl } from './markdown.js';
 import { buildStyles } from './styles.js';
 
 export const ELEMENT_TAG = 'smooth-agent-chat';
@@ -45,24 +46,9 @@ const ICON = {
     shield: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3 5 6v5c0 4.4 3 7.2 7 8.5 4-1.3 7-4.1 7-8.5V6l-7-3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m9 11.5 2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 } as const;
 
-/**
- * Return `url` only if it is a valid absolute `http(s)` URL, else `null`.
- *
- * SECURITY: citation URLs originate from indexed content (web / GitHub
- * connectors), which can be attacker-influenceable. Assigning an arbitrary
- * string to `<a>.href` allows `javascript:`/`data:`/`vbscript:` URLs that
- * execute on click — a stored-XSS vector. Only http(s) links are rendered as
- * anchors; anything else falls back to plain text.
- */
-export function safeHttpUrl(url: string | undefined | null): string | null {
-    if (!url) return null;
-    try {
-        const parsed = new URL(url);
-        return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
-    } catch {
-        return null;
-    }
-}
+// `safeHttpUrl` / `escapeHtml` live in `./markdown.js` (the markdown renderer
+// needs them too); re-exported here for back-compat with existing importers.
+export { escapeHtml, safeHttpUrl } from './markdown.js';
 
 export class SmoothAgentChatElement extends HTMLElement {
     static get observedAttributes(): readonly string[] {
@@ -82,6 +68,8 @@ export class SmoothAgentChatElement extends HTMLElement {
     private hasSent = false;
     /** Starter prompts shown as chips in the empty state. */
     private examplePrompts: string[] = [];
+    /** Resolved greeting text, cached so async (rAF) renders can reuse it. */
+    private greeting = '';
     /** Current mid-turn interrupt (OTP / tool-confirmation), or null. */
     private interrupt: Interrupt | null = null;
     private interruptEl: HTMLElement | null = null;
@@ -95,6 +83,22 @@ export class SmoothAgentChatElement extends HTMLElement {
     private inputEl: HTMLTextAreaElement | null = null;
     private sendBtn: HTMLButtonElement | null = null;
 
+    // ── Smooth streaming reveal ──
+    // Tokens arrive in variable-size bursts at uneven rates, so revealing text in
+    // lockstep with arrival looks jerky. Instead we buffer the full target text
+    // and reveal it via a requestAnimationFrame "typewriter" at an adaptive rate
+    // (chars/frame scales with the pending backlog so it never falls behind the
+    // network). State below tracks the single in-flight streaming bubble.
+    /** The live streaming assistant bubble whose textContent the rAF loop drives. */
+    private streamBubbleEl: HTMLElement | null = null;
+    /** Message id the reveal is bound to (guards against stale frames after rebuilds). */
+    private streamMsgId: string | null = null;
+    /** Full buffered target text for the streaming message (grows as tokens arrive). */
+    private streamTarget = '';
+    /** How many chars of {@link streamTarget} are currently shown. */
+    private displayedLength = 0;
+    private rafId = 0;
+
     constructor() {
         super();
         this.root = this.attachShadow({ mode: 'open' });
@@ -107,6 +111,7 @@ export class SmoothAgentChatElement extends HTMLElement {
 
     disconnectedCallback(): void {
         this.mounted = false;
+        this.resetReveal();
         this.controller?.disconnect();
         this.controller = null;
     }
@@ -186,8 +191,7 @@ export class SmoothAgentChatElement extends HTMLElement {
         if (!this.controller) {
             this.controller = new ConversationController(config, {
                 onMessages: (messages) => {
-                    this.messages = messages;
-                    this.renderMessages(resolved.greeting);
+                    this.handleMessages(messages, resolved.greeting);
                 },
                 onStatus: (status) => {
                     this.status = status;
@@ -232,8 +236,9 @@ export class SmoothAgentChatElement extends HTMLElement {
                     <button class="close" aria-label="Close chat">${ICON.close}</button>
                 </div>`;
 
-        // Remember starter prompts for the empty-state chips.
+        // Remember starter prompts + greeting for the empty-state chips / async renders.
         this.examplePrompts = resolved.examplePrompts;
+        this.greeting = resolved.greeting;
 
         // Gate the conversation behind a pre-chat identity form when required.
         const gating = needsUserInfo(resolved) && !this.userInfoSatisfied;
@@ -277,6 +282,9 @@ export class SmoothAgentChatElement extends HTMLElement {
         const logoSvg = container.querySelector('.logo-wrap svg');
         if (logoSvg) logoSvg.setAttribute('class', 'logo');
 
+        // A full DOM rebuild invalidates any cached streaming-bubble ref; cancel
+        // the in-flight reveal loop so renderMessages can re-bind cleanly.
+        this.resetReveal();
         this.root.replaceChildren(style, container);
 
         this.launcherEl = container.querySelector('.launcher');
@@ -310,7 +318,7 @@ export class SmoothAgentChatElement extends HTMLElement {
         if (fullpage && !gating) void this.controller?.connect().catch(() => {});
 
         this.syncOpenState();
-        if (!gating) this.renderMessages(resolved.greeting);
+        if (!gating) this.renderMessages();
         this.renderStatus();
         this.renderComposerState();
         this.renderInterrupt();
@@ -449,10 +457,52 @@ export class SmoothAgentChatElement extends HTMLElement {
         ta.style.height = `${ta.scrollHeight}px`;
     }
 
-    private renderMessages(greeting: string): void {
+    /**
+     * Receive a new message snapshot from the controller and update the view.
+     *
+     * `onMessages` fires on *every* `stream_token` delta. Rebuilding the whole
+     * list each frame is wasteful and fights the smooth reveal, so we take the
+     * cheap path when the only change is the trailing streaming assistant message
+     * growing: just bump the reveal *target* (the rAF loop drains it). Any
+     * structural change (new message, finalize, citations) triggers a full
+     * rebuild via {@link renderMessages}.
+     */
+    private handleMessages(messages: ChatMessage[], greeting: string): void {
+        this.greeting = greeting;
+        const prev = this.messages;
+        const last = messages[messages.length - 1];
+        const prevLast = prev[prev.length - 1];
+
+        const structural =
+            messages.length !== prev.length ||
+            !last ||
+            !prevLast ||
+            last.id !== prevLast.id ||
+            last.role !== prevLast.role ||
+            // finalize transition (streaming → done) needs the markdown render + sources
+            last.streaming !== prevLast.streaming ||
+            // first token after the typing indicator needs the bubble swapped in
+            (!!last.streaming && !prevLast.text && !!last.text);
+
+        this.messages = messages;
+
+        if (!structural && last && last.streaming && last.id === this.streamMsgId) {
+            // Fast path: the streaming tail just grew. Bump the reveal target and
+            // let the rAF loop catch up — no DOM rebuild, no per-token reflow.
+            this.streamTarget = last.text;
+            this.ensureRevealLoop();
+            return;
+        }
+
+        this.renderMessages();
+    }
+
+    private renderMessages(): void {
         if (!this.messagesEl) return;
+        this.resetReveal();
         this.messagesEl.replaceChildren();
 
+        const greeting = this.greeting;
         if (this.messages.length === 0 && greeting) {
             this.messagesEl.appendChild(this.buildRow('assistant', this.greetingBubble(greeting)));
         }
@@ -480,9 +530,21 @@ export class SmoothAgentChatElement extends HTMLElement {
                 bubble.classList.add('typing');
                 bubble.append(this.typingDot(), this.typingDot(), this.typingDot());
             } else if (msg.streaming) {
+                // Mid-stream: partial/unclosed markdown renders ugly (half-open
+                // `**`, dangling `[`), so keep plain text + the blinking cursor.
+                // The text is revealed gradually by the rAF typewriter; seed the
+                // bubble with whatever is already displayed and bind the reveal.
                 bubble.classList.add('cursor');
-                bubble.textContent = msg.text;
+                this.bindReveal(msg, bubble);
+            } else if (msg.role === 'assistant') {
+                // Final assistant turn → render the sanitized markdown subset.
+                // `renderMarkdown` escapes all text, drops images, gates links to
+                // http(s), and only emits an allowlisted set of tags, so this
+                // `innerHTML` cannot inject markup (see markdown.ts).
+                bubble.classList.add('md');
+                bubble.innerHTML = renderMarkdown(msg.text);
             } else {
+                // User bubbles stay plain text.
                 bubble.textContent = msg.text;
             }
             this.messagesEl.appendChild(this.buildRow(msg.role, bubble));
@@ -493,7 +555,115 @@ export class SmoothAgentChatElement extends HTMLElement {
                 this.messagesEl.appendChild(this.renderSources(msg.citations));
             }
         }
-        this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+        this.scrollToBottom(true);
+    }
+
+    // ─────────────────────── Smooth streaming reveal ───────────────────────────
+
+    /** True when the host/user prefers reduced motion (snap, no typewriter). */
+    private prefersReducedMotion(): boolean {
+        return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+
+    /**
+     * Bind the rAF typewriter to a freshly built streaming bubble. Preserves the
+     * already-revealed prefix across rebuilds (so a structural rebuild mid-stream
+     * doesn't restart the reveal from zero), then resumes the loop.
+     */
+    private bindReveal(msg: ChatMessage, bubble: HTMLElement): void {
+        const carryOver = msg.id === this.streamMsgId ? Math.min(this.displayedLength, msg.text.length) : 0;
+        this.streamBubbleEl = bubble;
+        this.streamMsgId = msg.id;
+        this.streamTarget = msg.text;
+        this.displayedLength = carryOver;
+
+        if (this.prefersReducedMotion()) {
+            // No animation: show everything immediately.
+            this.displayedLength = msg.text.length;
+            bubble.textContent = msg.text;
+            return;
+        }
+        bubble.textContent = msg.text.slice(0, this.displayedLength);
+        this.ensureRevealLoop();
+    }
+
+    /** Start the rAF loop if it isn't already running. */
+    private ensureRevealLoop(): void {
+        if (this.prefersReducedMotion() || typeof requestAnimationFrame !== 'function') {
+            // No animation (reduced-motion or no rAF): snap to the full buffer.
+            this.snapReveal();
+            return;
+        }
+        if (this.rafId) return; // already running
+        this.rafId = requestAnimationFrame(() => this.tickReveal());
+    }
+
+    /**
+     * One animation frame of the reveal. Advances `displayedLength` toward the
+     * buffered target at an ADAPTIVE rate — the deeper the backlog, the more
+     * chars per frame — so the reveal stays smooth yet never falls behind the
+     * network. Updates ONLY the bound bubble's textContent (no list rebuild).
+     */
+    private tickReveal(): void {
+        this.rafId = 0;
+        const bubble = this.streamBubbleEl;
+        if (!bubble) return;
+
+        const target = this.streamTarget;
+        const remaining = target.length - this.displayedLength;
+
+        if (remaining <= 0) {
+            // Caught up to everything buffered so far → idle. A later token bump
+            // (handleMessages → ensureRevealLoop) restarts the loop; the finalize
+            // structural rebuild snaps to the full markdown render.
+            return;
+        }
+
+        // Adaptive speed: ~1/8 of the backlog per frame (≈ catch up over a few
+        // frames), clamped to a readable floor so short bursts still animate and
+        // an aggressive ceiling so a deep buffer drains fast. At ~60fps this
+        // comfortably outruns the wire — the reveal is steady, never bursty.
+        const step = Math.max(2, Math.min(remaining, Math.ceil(remaining / 8)));
+        this.displayedLength = Math.min(target.length, this.displayedLength + step);
+        bubble.textContent = target.slice(0, this.displayedLength);
+        this.scrollToBottom(false);
+
+        this.rafId = requestAnimationFrame(() => this.tickReveal());
+    }
+
+    /** Snap the bound bubble to the full buffered text immediately (reduced-motion / no-rAF). */
+    private snapReveal(): void {
+        if (this.streamBubbleEl) {
+            this.displayedLength = this.streamTarget.length;
+            this.streamBubbleEl.textContent = this.streamTarget;
+        }
+    }
+
+    /** Cancel any in-flight reveal loop and clear its state (called on full rebuild). */
+    private resetReveal(): void {
+        if (this.rafId && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.rafId);
+        this.rafId = 0;
+        this.streamBubbleEl = null;
+        // streamMsgId/displayedLength are intentionally kept so bindReveal can
+        // carry the revealed prefix across a structural rebuild of the same msg;
+        // they're reset when a different message binds.
+    }
+
+    /**
+     * Auto-scroll the message list to the bottom — but don't fight a visitor who
+     * has scrolled up to read history. When `force` (a structural rebuild) we
+     * always pin to bottom; during the streaming reveal we only follow if the
+     * viewport is already near the bottom.
+     */
+    private scrollToBottom(force: boolean): void {
+        const el = this.messagesEl;
+        if (!el) return;
+        if (force) {
+            el.scrollTop = el.scrollHeight;
+            return;
+        }
+        const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        if (nearBottom) el.scrollTop = el.scrollHeight;
     }
 
     /** Wrap a bubble in a `.row`, prefixing assistant rows with a mini avatar. */
@@ -563,7 +733,7 @@ export class SmoothAgentChatElement extends HTMLElement {
                 a.className = 'src-title';
                 a.href = safeUrl;
                 a.target = '_blank';
-                a.rel = 'noopener noreferrer';
+                a.rel = 'noopener noreferrer nofollow';
                 titleEl = a;
             } else {
                 titleEl = document.createElement('span');
@@ -573,10 +743,18 @@ export class SmoothAgentChatElement extends HTMLElement {
             li.appendChild(titleEl);
 
             if (c.snippet) {
-                const snip = document.createElement('span');
-                snip.className = 'src-snippet';
-                snip.textContent = c.snippet;
-                li.appendChild(snip);
+                // The snippet is the raw scraped chunk — often led by page
+                // boilerplate (logo link, nav, whitespace). Trim it to a clean
+                // excerpt, then render the sanitized markdown subset. Both steps
+                // escape text + drop images/unsafe links (see markdown.ts), so
+                // this `innerHTML` is safe.
+                const cleaned = cleanCitationSnippet(c.snippet);
+                if (cleaned) {
+                    const snip = document.createElement('span');
+                    snip.className = 'src-snippet md';
+                    snip.innerHTML = renderMarkdown(cleaned);
+                    li.appendChild(snip);
+                }
             }
             list.appendChild(li);
         }
@@ -616,23 +794,6 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.autosize();
         void this.controller.send(text);
     }
-}
-
-function escapeHtml(value: string): string {
-    return value.replace(/[&<>"']/g, (c) => {
-        switch (c) {
-            case '&':
-                return '&amp;';
-            case '<':
-                return '&lt;';
-            case '>':
-                return '&gt;';
-            case '"':
-                return '&quot;';
-            default:
-                return '&#39;';
-        }
-    });
 }
 
 /** Register the custom element once. Safe to call multiple times. */
