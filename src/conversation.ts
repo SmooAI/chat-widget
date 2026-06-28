@@ -40,15 +40,20 @@ import { type ConsentState, createWidgetStore, type WidgetStore } from './persis
  * the cross-device identity flow + fingerprint resume are HTTP POST routes on the
  * wrapper (origin-allowlisted + authContext, per ADR-046/ADR-048) — NOT WS frames.
  */
-export function httpBaseFromWsEndpoint(endpoint: string): string {
+export function httpBaseFromWsEndpoint(endpoint: string): string | null {
     try {
         const u = new URL(endpoint);
         u.protocol = u.protocol === 'ws:' ? 'http:' : u.protocol === 'wss:' ? 'https:' : u.protocol;
         // The REST routes live at the host root (`/internal/*`), not under `/ws`.
         return `${u.protocol}//${u.host}`;
     } catch {
-        // Best-effort string fallback for a non-absolute endpoint.
-        return endpoint.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/ws\/?$/, '');
+        // FAIL LOUD on a non-absolute endpoint. A relative fallback (e.g.
+        // `string.replace`) would yield a relative base, and `fetch(\`${base}/internal/...\`)`
+        // would then POST identity/OTP data to the HOST page origin (e.g. smoo.ai)
+        // instead of the operator host (ai.smoo.ai) — leaking it to the wrong origin.
+        // Returning null forces the controller into an error state and refuses the
+        // `/internal/*` calls rather than mis-targeting them.
+        return null;
     }
 }
 
@@ -207,16 +212,41 @@ export class ConversationController {
     private activeRequestId: string | null = null;
     private interrupt: Interrupt | null = null;
     private identityRestore: IdentityRestore = { phase: 'idle' };
-    /** HTTP base for the chat-ws wrapper's `/internal/*` REST routes. */
-    private readonly httpBase: string;
+    /**
+     * True once the resume probe (persisted-pointer get_session OR the
+     * `/internal/resume-by-fingerprint` POST) has run for this controller. Makes
+     * `connect()` idempotent: re-entering after a transient `error` status (e.g. a
+     * retried `send()`) creates a fresh session rather than re-running the resume
+     * probe — which would fire another `resumeByFingerprint` POST and could adopt a
+     * session we already decided not to resume.
+     */
+    private resumeAttempted = false;
+    /**
+     * HTTP base for the chat-ws wrapper's `/internal/*` REST routes. `null` when
+     * the configured WS endpoint could not be parsed into an absolute origin — in
+     * that case the `/internal/*` routes are refused (rather than mis-targeted at
+     * the host page origin). See {@link httpBaseFromWsEndpoint}.
+     */
+    private readonly httpBase: string | null;
 
     constructor(config: ChatWidgetConfig, events: ConversationEvents, store?: StoreApi<WidgetStore>) {
         this.config = config;
         this.events = events;
         this.httpBase = httpBaseFromWsEndpoint(config.endpoint);
+        if (this.httpBase === null) {
+            // A non-absolute endpoint means the identity / resume `/internal/*` routes
+            // have no safe target. Flag the controller in error so the UI surfaces it
+            // and the routes refuse (see postInternal) rather than mis-targeting the
+            // host page origin. Deferred to a microtask so listeners attached after
+            // construction still observe the transition.
+            queueMicrotask(() => this.setStatus('error', `Invalid chat endpoint: ${config.endpoint}`));
+        }
         this.store = store ?? createWidgetStore(config.agentId);
-        // Seed identity from config into the persisted store (config wins on first
-        // load; the persisted values survive across reloads thereafter).
+        // Seed identity from config into the persisted store. `mergeIdentity` is
+        // applied on EVERY construct, so a config-provided field always wins over
+        // the persisted value (config is authoritative when present). Fields the
+        // config does NOT provide keep their persisted value — those survive across
+        // reloads; explicitly-configured ones are re-applied each load.
         const seed: { name?: string; email?: string; phone?: string } = {};
         if (config.userName) seed.name = config.userName;
         if (config.userEmail) seed.email = config.userEmail;
@@ -312,7 +342,16 @@ export class ConversationController {
 
     /**
      * Build the `metadata` payload threaded into `create_conversation_session`:
-     * phone (no first-class engine field), consent, and a verified email when known.
+     * phone (no first-class engine field) and consent.
+     *
+     * NOTE: `verifiedEmail` is deliberately NOT stamped here. It is a per-session
+     * OTP proof bound to the session it was verified against
+     * (`verifiedEmailSessionId`), and the server only treats an actual OTP `verify`
+     * as proof — metadata `verifiedEmail` is just a hint. Auto-stamping it onto
+     * every brand-new `create_conversation_session` would mislabel a fresh
+     * visitor's session with a prior (possibly different) visitor's email on a
+     * shared browser. The verified email is only used when RESUMING the exact
+     * session it was proven for — see {@link verifiedEmailForSession}.
      */
     private sessionMetadata(): Record<string, unknown> | undefined {
         const state = this.store.getState();
@@ -328,8 +367,21 @@ export class ConversationController {
             if (consent.consentAt) c.consentAt = consent.consentAt;
             meta.consent = c;
         }
-        if (state.verifiedEmail) meta.verifiedEmail = state.verifiedEmail;
         return Object.keys(meta).length > 0 ? meta : undefined;
+    }
+
+    /**
+     * The verified-email hint, but ONLY when the OTP proof is bound to the session
+     * being resumed (`verifiedEmailSessionId === sessionId`). Returns null
+     * otherwise so a stale/cross-visitor proof is never threaded onto a session it
+     * wasn't proven for.
+     */
+    private verifiedEmailForSession(sessionId: string): string | null {
+        const state = this.store.getState();
+        if (state.verifiedEmail && state.verifiedEmailSessionId === sessionId) {
+            return state.verifiedEmail;
+        }
+        return null;
     }
 
     /** Lazily open the WS client (default transport). Idempotent within a connect. */
@@ -356,25 +408,34 @@ export class ConversationController {
         this.setStatus('connecting');
         try {
             await this.ensureClient();
-            const persistedSessionId = this.store.getState().sessionId;
-            if (persistedSessionId) {
-                const resumed = await this.tryResume(persistedSessionId);
-                if (resumed) {
-                    this.setStatus('ready');
-                    return;
-                }
-                // Resume failed (ended/404/gone) — clear the pointer, keep identity.
-                this.store.getState().clearSession();
-            } else {
-                // Returning anonymous visitor with no stored pointer: ask the
-                // wrapper to resolve a recent session for this fingerprint.
-                const fpSessionId = await this.resumeByFingerprint();
-                if (fpSessionId) {
-                    const resumed = await this.tryResume(fpSessionId);
+            // The resume probe (persisted-pointer get_session OR the fingerprint
+            // resume POST) runs AT MOST ONCE per controller lifecycle. Re-entering
+            // connect() after a transient error (e.g. a retried send()) must not
+            // re-run the probe — that would re-fire resumeByFingerprint and could
+            // adopt a session we already chose not to resume. After the first
+            // attempt, fall straight through to creating a fresh session.
+            if (!this.resumeAttempted) {
+                this.resumeAttempted = true;
+                const persistedSessionId = this.store.getState().sessionId;
+                if (persistedSessionId) {
+                    const resumed = await this.tryResume(persistedSessionId);
                     if (resumed) {
-                        this.store.getState().setSessionId(fpSessionId);
                         this.setStatus('ready');
                         return;
+                    }
+                    // Resume failed (ended/404/gone) — clear the pointer, keep identity.
+                    this.store.getState().clearSession();
+                } else {
+                    // Returning anonymous visitor with no stored pointer: ask the
+                    // wrapper to resolve a recent session for this fingerprint.
+                    const fpSessionId = await this.resumeByFingerprint();
+                    if (fpSessionId) {
+                        const resumed = await this.tryResume(fpSessionId);
+                        if (resumed) {
+                            this.store.getState().setSessionId(fpSessionId);
+                            this.setStatus('ready');
+                            return;
+                        }
                     }
                 }
             }
@@ -403,12 +464,22 @@ export class ConversationController {
 
     /** POST JSON to a `/internal/*` route; returns the parsed body (or throws). */
     private async postInternal(path: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+        if (this.httpBase === null) {
+            // No absolute origin could be derived from the WS endpoint — refuse the
+            // call loudly rather than POST identity data to a relative (host-page) URL.
+            throw new Error(`Cannot reach ${path}: the chat endpoint is not an absolute URL.`);
+        }
         const res = await fetch(`${this.httpBase}${path}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            // Identity/origin checks are cookie- and Origin-based; send credentials
-            // so any session cookie the host set rides along.
-            credentials: 'include',
+            // Auth is the `Origin` allowlist + the `authContext` body field — NOT
+            // cookies. `credentials: 'include'` would force the server to reply with
+            // `Access-Control-Allow-Credentials: true` AND a reflected origin (a
+            // wildcard `*` is illegal with credentials), so a plain origin-allowlisted
+            // CORS config would fail the preflight and break EVERY `/internal/*` call.
+            // Omit credentials so the cross-origin POST works against an allowlist
+            // that doesn't (and shouldn't need to) opt into credentialed CORS.
+            credentials: 'omit',
             body: JSON.stringify({ ...this.authBody(), ...payload }),
         });
         let json: Record<string, unknown> = {};
@@ -611,10 +682,11 @@ export class ConversationController {
     // ─────────────────── Cross-device "restore my chats" (§c) ───────────────────
     //
     // Three HTTP POST routes on the chat-ws wrapper (the engine `/ws` dispatch
-    // rejects unknown verbs): request-otp → verify-otp → resolve. verify-otp and
-    // resolve are session-scoped — they require a live `sessionId` (a uuid), which
-    // is guaranteed because the widget connects (creating/resuming a session)
-    // before exposing the restore affordance.
+    // rejects unknown verbs): request-otp → verify-otp → resolve. ALL THREE are
+    // session-scoped — they require a live `sessionId` (a uuid). request-otp
+    // establishes the session itself (idempotent connect) before sending, so the
+    // whole flow shares one session and verify-otp can't hit "No active session"
+    // even if the email was submitted before the initial connect() resolved.
 
     /**
      * Begin the cross-device restore: POST `/internal/identity/request-otp` for
@@ -624,9 +696,25 @@ export class ConversationController {
         const trimmed = email.trim();
         if (!trimmed) return;
         this.setIdentityRestore({ phase: 'requesting', email: trimmed, channel });
+        // request-otp must be SESSION-CONSISTENT with verify-otp (which hard-requires
+        // a sessionId). If the restore affordance fired request-otp before connect()
+        // resolved, there'd be no sessionId here and verify-otp would later error
+        // "No active session." Establish a session first (idempotent connect), then
+        // require it — so the whole request → verify flow shares one live session.
+        if (!this.sessionId) {
+            try {
+                await this.connect();
+            } catch {
+                /* fall through: handled by the sessionId check below */
+            }
+        }
+        if (!this.sessionId) {
+            this.setIdentityRestore({ phase: 'error', message: 'No active session to verify against.' });
+            return;
+        }
         try {
             const json = await this.postInternal('/internal/identity/request-otp', {
-                ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+                sessionId: this.sessionId,
                 email: trimmed,
                 channel,
             });
@@ -651,7 +739,9 @@ export class ConversationController {
         try {
             const json = await this.postInternal('/internal/identity/verify-otp', { sessionId: this.sessionId, email, code: trimmed });
             if (json.event === 'otp_verified') {
-                this.store.getState().setVerifiedEmail(email);
+                // Bind the OTP proof to the session it was verified against, so it
+                // can't leak onto a different visitor's session on a shared browser.
+                this.store.getState().setVerifiedEmail(email, this.sessionId);
                 await this.resolveIdentity(email);
             } else if (json.event === 'otp_invalid') {
                 const remaining = typeof json.attemptsRemaining === 'number' ? json.attemptsRemaining : undefined;
@@ -705,9 +795,18 @@ export class ConversationController {
      */
     async restoreConversation(sessionId: string): Promise<void> {
         if (!this.client) await this.ensureClient();
+        // Capture the OTP proof bound to the CURRENT live session BEFORE tryResume
+        // repoints this.sessionId to the restored one. The visitor proved ownership
+        // of this email in this very flow, so the proof legitimately follows the
+        // conversation they chose to restore.
+        const proven = this.sessionId ? this.verifiedEmailForSession(this.sessionId) : null;
         const resumed = await this.tryResume(sessionId);
         if (resumed) {
             this.store.getState().setSessionId(sessionId);
+            // Rebind the proof to the restored session (keeps verifiedEmail
+            // session-scoped, just now to the session it's actually used on). Only a
+            // proof from the just-verified session follows — never an unrelated stale one.
+            if (proven) this.store.getState().setVerifiedEmail(proven, sessionId);
             this.setIdentityRestore({ phase: 'idle' });
             this.setStatus('ready');
         } else {
@@ -726,6 +825,9 @@ export class ConversationController {
         this.client = null;
         this.sessionId = null;
         this.activeRequestId = null;
+        // A full teardown ends the controller lifecycle: a subsequent connect() is a
+        // genuine re-open and may resume again, so re-arm the resume probe.
+        this.resumeAttempted = false;
         this.setInterrupt(null);
         this.setStatus('closed');
     }

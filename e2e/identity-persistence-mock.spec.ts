@@ -57,7 +57,7 @@ const MOCK_WS = `
   window.fetch = async (url, init) => {
     const u = new URL(url, location.href);
     const body = init && init.body ? JSON.parse(init.body) : {};
-    window.__http.push({ path: u.pathname, body });
+    window.__http.push({ path: u.pathname, body, origin: u.origin, credentials: init && init.credentials });
     const route = (window.__httpScript || (() => ({ json: { resumable: false } })));
     const { status = 200, json = {} } = route(u.pathname, body) || {};
     return { ok: status >= 200 && status < 300, status, json: async () => json };
@@ -419,4 +419,82 @@ test('fingerprint resume: no persisted pointer → POST /internal/resume-by-fing
     expect(result.createdSession, 'must NOT create a session when fingerprint resumes').toBe(false);
     expect(result.persistedSession).toBe('sess-FP');
     expect(result.replayed).toContain('Welcome back');
+});
+
+test("hardening: every /internal/* POST omits credentials, restore-link awaits connect, and request-otp carries a sessionId", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e) => pageErrors.push(`${e.name}: ${e.message}`));
+
+    await page.addInitScript(MOCK_WS);
+    await page.goto(`http://127.0.0.1:${process.env.STATIC_PORT ?? 4830}/e2e/fixtures/demo.html`).catch(async () => {
+        await page.goto('about:blank');
+    });
+    await page.addScriptTag({ content: GLOBAL_BUNDLE });
+
+    const result = await page.evaluate(
+        async ({ endpoint, agentId }) => {
+            const s = (ms: number) => new Promise((r) => setTimeout(r, ms));
+            try {
+                localStorage.clear();
+            } catch {
+                /* ignore */
+            }
+            (window as unknown as { __script: unknown }).__script = (f: Record<string, unknown>, reply: (o: unknown) => void) => {
+                switch (f.action) {
+                    case 'create_conversation_session':
+                        reply({ type: 'immediate_response', requestId: f.requestId, status: 202, data: { sessionId: 'sess-A', conversationId: 'c', agentId: f.agentId } });
+                        break;
+                    case 'get_session':
+                        reply({ type: 'immediate_response', requestId: f.requestId, status: 200, data: { sessionId: f.sessionId, status: 'active', agentId } });
+                        break;
+                    case 'get_conversation_messages':
+                        reply({ type: 'immediate_response', requestId: f.requestId, status: 200, data: { messages: [], hasMore: false } });
+                        break;
+                }
+            };
+            (window as unknown as { __httpScript: unknown }).__httpScript = (path: string) => {
+                switch (path) {
+                    case '/internal/resume-by-fingerprint':
+                        return { json: { resumable: false } };
+                    case '/internal/identity/request-otp':
+                        return { json: { event: 'otp_sent', maskedDestination: 'a***@example.com' } };
+                    default:
+                        return { json: {} };
+                }
+            };
+            // @ts-expect-error injected global
+            const el = window.SmoothAgentChat.mount({ endpoint, agentId, greeting: '' });
+            const root = (el as { shadowRoot: ShadowRoot }).shadowRoot;
+            (root.querySelector('.launcher') as HTMLElement | null)?.click();
+            await s(30);
+
+            // Click "Restore my chats" then IMMEDIATELY submit the email — racing the
+            // (now awaited) connect(). The hardened flow must still have a sessionId on
+            // the request-otp POST.
+            (root.querySelector('.restore-link') as HTMLElement | null)?.click();
+            await s(10);
+            const emailInput = root.querySelector('.int-card .int-input') as HTMLInputElement;
+            emailInput.value = 'ada@example.com';
+            (root.querySelector('.int-card .int-btn.primary') as HTMLElement).click();
+
+            // Wait for the request-otp call to land.
+            for (let i = 0; i < 80; i++) {
+                if ((window as unknown as { __http: { path: string }[] }).__http.some((h) => h.path === '/internal/identity/request-otp')) break;
+                await s(25);
+            }
+            const http = (window as unknown as { __http: { path: string; body: Record<string, unknown>; credentials?: string }[] }).__http;
+            const otp = http.find((h) => h.path === '/internal/identity/request-otp');
+            return {
+                allOmit: http.length > 0 && http.every((h) => h.credentials === 'omit'),
+                requestOtpHasSession: typeof otp?.body.sessionId === 'string' && (otp.body.sessionId as string).length > 0,
+                sentSession: otp?.body.sessionId,
+            };
+        },
+        { endpoint: ENDPOINT, agentId: AGENT_ID },
+    );
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+    expect(result.allOmit, "every /internal/* POST must use credentials: 'omit'").toBe(true);
+    expect(result.requestOtpHasSession, 'request-otp must carry a sessionId even when racing the restore-link connect()').toBe(true);
+    expect(result.sentSession).toBe('sess-A');
 });

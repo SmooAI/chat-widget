@@ -352,11 +352,18 @@ export class SmoothAgentChatElement extends HTMLElement {
         });
 
         // Cross-device "Restore my chats": open the panel + start the email entry.
+        // AWAIT connect() before showing the email step so a `sessionId` exists by
+        // the time the visitor submits — otherwise request-otp could go out with no
+        // session and verify-otp would then hard-error "No active session." The
+        // request-otp/verify-otp paths in the controller also require a session, so
+        // gating here keeps the affordance race-free.
         container.querySelector('.restore-link')?.addEventListener('click', () => {
-            // Ensure we have a live transport before the OTP request.
-            void this.controller?.connect().catch(() => {});
-            this.identityRestore = { phase: 'awaiting_email' };
-            this.renderInterrupt();
+            void (async () => {
+                this.identityRestore = { phase: 'awaiting_email' };
+                this.renderInterrupt();
+                // Establish a live session before the email entry can fire request-otp.
+                await this.controller?.connect().catch(() => {});
+            })();
         });
 
         // Full-page mode connects eagerly (there's no launcher click to trigger it) —

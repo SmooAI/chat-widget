@@ -52,8 +52,16 @@ export interface PersistedWidgetState {
     sessionId: string | null;
     identity: IdentityState;
     consent: ConsentState;
-    /** Email proven via OTP (same-session or cross-device). Survives session clears. */
+    /**
+     * Email proven via OTP for the CURRENT session. Session-scoped: cleared on
+     * `clearSession()` so it can't leak across visitors on a shared browser, and
+     * only threaded into session metadata when {@link verifiedEmailSessionId}
+     * matches the live session (i.e. on resume of the verified session) — never
+     * auto-stamped onto a brand-new session.
+     */
     verifiedEmail: string | null;
+    /** The sessionId the {@link verifiedEmail} was proven against (binds the proof to one session). */
+    verifiedEmailSessionId: string | null;
     /** Stable per-browser correlation token (see fingerprint.ts). */
     browserFingerprint: string | null;
 }
@@ -65,12 +73,16 @@ export interface WidgetStoreActions {
     mergeIdentity: (identity: IdentityState) => void;
     /** Replace consent wholesale (the pre-chat form computes the full record). */
     setConsent: (consent: ConsentState) => void;
-    setVerifiedEmail: (email: string | null) => void;
+    /** Record an OTP-proven email bound to a specific session. */
+    setVerifiedEmail: (email: string | null, sessionId?: string | null) => void;
     setBrowserFingerprint: (fp: string) => void;
     /**
-     * Clear the session pointer but KEEP identity / consent / verifiedEmail /
-     * fingerprint — used when a persisted session has ended or 404s so the next
-     * turn starts a fresh session for a known visitor.
+     * Clear the session pointer (and the session-scoped `verifiedEmail` proof) but
+     * KEEP identity / consent / fingerprint — used when a persisted session has
+     * ended or 404s so the next turn starts a fresh session for a known visitor.
+     * `verifiedEmail` is deliberately cleared here: it is a per-session OTP proof,
+     * not a durable identity, so it must NOT survive onto a new session (which on a
+     * shared browser could be a different visitor).
      */
     clearSession: () => void;
 }
@@ -86,6 +98,7 @@ function initialPersisted(): PersistedWidgetState {
         identity: {},
         consent: { ...EMPTY_CONSENT },
         verifiedEmail: null,
+        verifiedEmailSessionId: null,
         browserFingerprint: null,
     };
 }
@@ -96,12 +109,44 @@ export function storageKey(agentId: string): string {
 }
 
 /**
+ * An explicit in-memory (Map-backed) `PersistStorage`. Used as the fallback when
+ * real localStorage is unavailable.
+ *
+ * IMPORTANT: we must NOT return `undefined` from {@link safeStorage} in that case.
+ * zustand v5's `persist` treats a missing `storage` option by falling back to its
+ * OWN `createJSONStorage(() => localStorage)` — i.e. it re-engages the very
+ * localStorage the guard was trying to avoid (throwing again in privacy mode).
+ * Handing it this no-op storage keeps the store working purely in memory and
+ * guarantees the fallback can't touch real localStorage.
+ */
+function memoryStorage(): PersistStorage<PersistedWidgetState> {
+    const mem = new Map<string, string>();
+    return {
+        getItem: (name) => {
+            const raw = mem.get(name);
+            if (!raw) return null;
+            try {
+                return JSON.parse(raw) as ReturnType<PersistStorage<PersistedWidgetState>['getItem']>;
+            } catch {
+                return null;
+            }
+        },
+        setItem: (name, value) => {
+            mem.set(name, JSON.stringify(value));
+        },
+        removeItem: (name) => {
+            mem.delete(name);
+        },
+    };
+}
+
+/**
  * A `persist` storage adapter that tolerates the *absence* of localStorage
  * (SSR, privacy-mode throwing on access, sandboxed iframes). When storage is
  * unavailable the store still works in-memory; nothing is persisted, but the
  * widget never throws on boot.
  */
-function safeStorage(): PersistStorage<PersistedWidgetState> | undefined {
+function safeStorage(): PersistStorage<PersistedWidgetState> {
     let ls: Storage | null = null;
     try {
         ls = typeof localStorage !== 'undefined' ? localStorage : null;
@@ -114,7 +159,8 @@ function safeStorage(): PersistStorage<PersistedWidgetState> | undefined {
     } catch {
         ls = null;
     }
-    if (!ls) return undefined;
+    // Fall back to an explicit in-memory store — NEVER `undefined` (see memoryStorage).
+    if (!ls) return memoryStorage();
     const storage = ls;
     return {
         getItem: (name) => {
@@ -166,6 +212,7 @@ function migrate(persisted: unknown): PersistedWidgetState {
             consentAt: typeof p.consent?.consentAt === 'string' ? p.consent.consentAt : undefined,
         },
         verifiedEmail: typeof p.verifiedEmail === 'string' ? p.verifiedEmail : null,
+        verifiedEmailSessionId: typeof p.verifiedEmailSessionId === 'string' ? p.verifiedEmailSessionId : null,
         browserFingerprint: typeof p.browserFingerprint === 'string' ? p.browserFingerprint : null,
     };
 }
@@ -191,9 +238,17 @@ export function createWidgetStore(agentId: string): StoreApi<WidgetStore> {
                         },
                     })),
                 setConsent: (consent) => set({ consent: { ...consent } }),
-                setVerifiedEmail: (verifiedEmail) => set({ verifiedEmail }),
+                setVerifiedEmail: (verifiedEmail, sessionId) =>
+                    set((state) => ({
+                        verifiedEmail,
+                        // Bind the proof to the session it was verified against. When the
+                        // caller omits sessionId, fall back to the live pointer so the
+                        // proof is never left unbound.
+                        verifiedEmailSessionId: verifiedEmail === null ? null : (sessionId ?? state.sessionId),
+                    })),
                 setBrowserFingerprint: (browserFingerprint) => set({ browserFingerprint }),
-                clearSession: () => set({ sessionId: null }),
+                // Drop the pointer AND the session-scoped OTP proof; keep durable identity.
+                clearSession: () => set({ sessionId: null, verifiedEmail: null, verifiedEmailSessionId: null }),
             }),
             {
                 name: storageKey(agentId),
@@ -207,6 +262,7 @@ export function createWidgetStore(agentId: string): StoreApi<WidgetStore> {
                     identity: state.identity,
                     consent: state.consent,
                     verifiedEmail: state.verifiedEmail,
+                    verifiedEmailSessionId: state.verifiedEmailSessionId,
                     browserFingerprint: state.browserFingerprint,
                 }),
             },

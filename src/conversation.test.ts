@@ -98,6 +98,7 @@ interface FetchCall {
     path: string;
     body: Record<string, unknown>;
     origin: string;
+    credentials?: RequestCredentials;
 }
 const fetchCalls: FetchCall[] = [];
 /** Per-test responder: path → JSON body (+ optional status). Default = resume:false. */
@@ -106,10 +107,10 @@ let fetchRouter: (path: string, body: Record<string, unknown>) => { status?: num
 function installMockFetch(): void {
     fetchCalls.length = 0;
     fetchRouter = () => ({ json: { resumable: false } });
-    (globalThis as unknown as { fetch: unknown }).fetch = async (url: string, init?: { body?: string }) => {
+    (globalThis as unknown as { fetch: unknown }).fetch = async (url: string, init?: { body?: string; credentials?: RequestCredentials }) => {
         const u = new URL(url);
         const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
-        fetchCalls.push({ path: u.pathname, body, origin: u.origin });
+        fetchCalls.push({ path: u.pathname, body, origin: u.origin, credentials: init?.credentials });
         const { status = 200, json } = fetchRouter(u.pathname, body);
         return {
             ok: status >= 200 && status < 300,
@@ -307,6 +308,44 @@ describe('httpBaseFromWsEndpoint', () => {
         expect(httpBaseFromWsEndpoint('ws://localhost:8787/ws')).toBe('http://localhost:8787');
         expect(httpBaseFromWsEndpoint('wss://ai.smoo.ai:9000/ws')).toBe('https://ai.smoo.ai:9000');
     });
+
+    it('FAILS LOUD (returns null) on a non-absolute endpoint instead of a relative base', () => {
+        // A relative base would make fetch(`${base}/internal/...`) POST identity data
+        // to the HOST page origin instead of the operator host. Null forces a refusal.
+        expect(httpBaseFromWsEndpoint('/ws')).toBeNull();
+        expect(httpBaseFromWsEndpoint('not a url')).toBeNull();
+        expect(httpBaseFromWsEndpoint('')).toBeNull();
+    });
+});
+
+describe('ConversationController — fail-loud on a non-absolute endpoint', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    it('enters error status and refuses /internal/* calls (no fetch) when the endpoint is not absolute', async () => {
+        const store = createWidgetStore(AGENT);
+        const onStatus = vi.fn();
+        const onIdentityRestore = vi.fn();
+        const controller = new ConversationController(
+            { endpoint: '/ws', agentId: AGENT },
+            { onMessages: vi.fn(), onStatus, onInterrupt: vi.fn(), onIdentityRestore },
+            store,
+        );
+        await tick();
+        // The constructor flagged the controller in error via a microtask.
+        expect(onStatus).toHaveBeenCalledWith('error', expect.stringContaining('/ws'));
+
+        // request-otp must NOT fire a fetch — it refuses with an identity-restore error.
+        await controller.requestIdentityOtp('ada@example.com');
+        expect(fetchCalls.length).toBe(0);
+        const last = onIdentityRestore.mock.calls.at(-1)?.[0] as IdentityRestore | undefined;
+        expect(last?.phase).toBe('error');
+    });
 });
 
 describe('ConversationController — fingerprint resume (ADR-048 §b, HTTP)', () => {
@@ -466,5 +505,125 @@ describe('ConversationController — cross-device restore (ADR-048 §c, HTTP)', 
         await controller.requestIdentityOtp('ada@example.com');
         const otpCall = fetchCalls.find((c) => c.path === '/internal/identity/request-otp');
         expect(otpCall?.body.authContext).toEqual(ac);
+    });
+});
+
+describe('ConversationController — adversarial-review hardening (SMOODEV-2129e)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    it("posts every /internal/* route with credentials: 'omit' (CORS allowlist auth, not cookies)", async () => {
+        fetchRouter = (path) => {
+            if (path === '/internal/identity/request-otp') return { json: { event: 'otp_sent', maskedDestination: 'a***@x.com' } };
+            return { json: { resumable: false } };
+        };
+        const { controller } = makeController();
+        // connect() with no pointer fires /internal/resume-by-fingerprint.
+        await controller.connect();
+        // and the identity route fires too.
+        await controller.requestIdentityOtp('ada@example.com');
+
+        expect(fetchCalls.length).toBeGreaterThan(0);
+        for (const call of fetchCalls) {
+            expect(call.credentials, `${call.path} must omit credentials`).toBe('omit');
+        }
+    });
+
+    it('does NOT thread verifiedEmail into a brand-new create_conversation_session', async () => {
+        // Seed a verifiedEmail bound to some OTHER session — it must not leak onto a
+        // freshly created session (which on a shared browser could be a new visitor).
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-other');
+        seed.getState().setVerifiedEmail('verified@example.com', 'sess-other');
+        seed.getState().clearSession(); // clearing leaves no pointer → fresh create path
+
+        // After clearSession the proof is gone; even if it weren't, a fresh create
+        // must never carry it. Re-seed it post-clear to prove the create path itself
+        // refuses to stamp it.
+        seed.getState().setVerifiedEmail('verified@example.com', 'sess-other');
+
+        const { controller } = makeController();
+        await controller.connect();
+        const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
+        expect(create).toBeTruthy();
+        const meta = (create.metadata ?? {}) as Record<string, unknown>;
+        expect(meta.verifiedEmail).toBeUndefined();
+    });
+
+    it('cross-device verify binds verifiedEmail to the live session id', async () => {
+        MockSocket.onFrame = defaultOnFrame;
+        fetchRouter = (path) => {
+            switch (path) {
+                case '/internal/resume-by-fingerprint':
+                    return { json: { resumable: false } };
+                case '/internal/identity/request-otp':
+                    return { json: { event: 'otp_sent', maskedDestination: 'a***@x.com' } };
+                case '/internal/identity/verify-otp':
+                    return { json: { event: 'otp_verified' } };
+                case '/internal/identity/resolve':
+                    return { json: { resolved: true, conversations: [] } };
+                default:
+                    return { json: {} };
+            }
+        };
+        const { controller, store } = makeController();
+        await controller.connect(); // creates sess-new
+        await controller.requestIdentityOtp('ada@example.com');
+        await controller.verifyIdentityOtp('123456');
+        await tick();
+        expect(store.getState().verifiedEmail).toBe('ada@example.com');
+        // Bound to the live session, not left unbound.
+        expect(store.getState().verifiedEmailSessionId).toBe('sess-new');
+    });
+
+    it('requestIdentityOtp establishes a session first, so request-otp carries a sessionId (no "No active session" on verify)', async () => {
+        // Simulate the restore-link race: the visitor submits the email BEFORE any
+        // prior connect(). requestIdentityOtp must connect, then send sessionId.
+        fetchRouter = (path) => {
+            if (path === '/internal/identity/request-otp') return { json: { event: 'otp_sent', maskedDestination: 'a***@x.com' } };
+            return { json: { resumable: false } };
+        };
+        const { controller } = makeController();
+        // No connect() called first — straight to requestIdentityOtp.
+        await controller.requestIdentityOtp('ada@example.com');
+
+        const otpCall = fetchCalls.find((c) => c.path === '/internal/identity/request-otp');
+        expect(otpCall, 'request-otp was sent').toBeTruthy();
+        // A session was established and threaded through.
+        expect(typeof otpCall?.body.sessionId).toBe('string');
+        expect(otpCall?.body.sessionId).toBe('sess-new');
+    });
+
+    it('resume probe runs at most once: re-entering connect() after an error does not re-POST resume-by-fingerprint', async () => {
+        let createCalls = 0;
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'create_conversation_session') {
+                createCalls += 1;
+                if (createCalls === 1) {
+                    // First create fails → controller goes to error.
+                    reply({ type: 'error', requestId, data: { requestId, error: { code: 'BOOM', message: 'transient' } } });
+                } else {
+                    reply({ type: 'immediate_response', requestId, status: 202, data: { sessionId: 'sess-2', conversationId: 'c', agentId: frame.agentId } });
+                }
+            }
+        };
+        fetchRouter = () => ({ json: { resumable: false } });
+
+        const { controller } = makeController();
+        await expect(controller.connect()).rejects.toBeTruthy();
+        // One resume-by-fingerprint probe on the first connect.
+        const probesAfterFirst = fetchCalls.filter((c) => c.path === '/internal/resume-by-fingerprint').length;
+        expect(probesAfterFirst).toBe(1);
+
+        // Re-enter connect() after the error — must NOT re-run the resume probe.
+        await controller.connect();
+        const probesAfterSecond = fetchCalls.filter((c) => c.path === '/internal/resume-by-fingerprint').length;
+        expect(probesAfterSecond, 'resume probe must run at most once').toBe(1);
     });
 });
