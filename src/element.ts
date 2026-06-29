@@ -16,7 +16,7 @@
  */
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { needsUserInfo, resolveConfig } from './config.js';
-import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type Interrupt } from './conversation.js';
+import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type IdentityRestore, type Interrupt } from './conversation.js';
 import { SMOOTH_LOGO_SVG } from './logo.js';
 import { cleanCitationSnippet, escapeHtml, renderMarkdown, safeHttpUrl } from './markdown.js';
 import { buildStyles } from './styles.js';
@@ -73,6 +73,12 @@ export class SmoothAgentChatElement extends HTMLElement {
     /** Current mid-turn interrupt (OTP / tool-confirmation), or null. */
     private interrupt: Interrupt | null = null;
     private interruptEl: HTMLElement | null = null;
+    /** Cross-device "restore my chats" flow state (ADR-048 §c). */
+    private identityRestore: IdentityRestore = { phase: 'idle' };
+    /** Whether the cross-device restore affordance is offered (config). */
+    private allowChatRestore = true;
+    /** True while the pre-chat identity gate is showing (blocks premature connect). */
+    private gating = false;
 
     // Cached DOM refs (populated in render()).
     private panelEl: HTMLElement | null = null;
@@ -136,7 +142,10 @@ export class SmoothAgentChatElement extends HTMLElement {
     openChat(): void {
         this.open = true;
         this.syncOpenState();
-        void this.controller?.connect().catch(() => {});
+        // Don't connect while the pre-chat identity gate is unsatisfied — connecting
+        // here would create a session BEFORE the visitor submits their name/email/
+        // consent, sending an empty identity. The form's submit handler connects.
+        if (!this.gating) void this.controller?.connect().catch(() => {});
     }
 
     /** Collapse the chat panel back to the launcher. */
@@ -163,6 +172,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             userName: this.overrides.userName,
             userEmail: this.overrides.userEmail,
             userPhone: this.overrides.userPhone,
+            authContext: this.overrides.authContext,
             placeholder: this.overrides.placeholder ?? this.getAttribute('placeholder') ?? undefined,
             greeting: this.overrides.greeting ?? this.getAttribute('greeting') ?? undefined,
             connectionErrorMessage: this.overrides.connectionErrorMessage,
@@ -171,6 +181,9 @@ export class SmoothAgentChatElement extends HTMLElement {
             requireName: this.overrides.requireName,
             requireEmail: this.overrides.requireEmail,
             requirePhone: this.overrides.requirePhone,
+            collectPhone: this.overrides.collectPhone,
+            collectConsent: this.overrides.collectConsent,
+            allowChatRestore: this.overrides.allowChatRestore,
             allowAnonymous: this.overrides.allowAnonymous,
             theme,
         };
@@ -185,6 +198,8 @@ export class SmoothAgentChatElement extends HTMLElement {
             return;
         }
         const resolved = resolveConfig(config);
+
+        this.allowChatRestore = resolved.allowChatRestore;
 
         // (Re)create the controller only when there isn't one yet. Attribute churn
         // (e.g. theme tweaks) re-renders the view without dropping the session.
@@ -202,8 +217,17 @@ export class SmoothAgentChatElement extends HTMLElement {
                     this.interrupt = interrupt;
                     this.renderInterrupt();
                 },
+                onIdentityRestore: (state) => {
+                    this.identityRestore = state;
+                    this.renderInterrupt();
+                },
             });
             if (resolved.startOpen) this.open = true;
+            // Returning visitor: a persisted session or identity lets us skip the
+            // pre-chat gate and resume straight into the conversation (ADR-048 §b).
+            if (this.controller.hasPersistedSession() || this.controller.hasPersistedIdentity()) {
+                this.userInfoSatisfied = true;
+            }
         }
 
         const fullpage = resolved.mode === 'fullpage';
@@ -242,8 +266,20 @@ export class SmoothAgentChatElement extends HTMLElement {
 
         // Gate the conversation behind a pre-chat identity form when required.
         const gating = needsUserInfo(resolved) && !this.userInfoSatisfied;
-        const field = (name: string, type: string, label: string, autocomplete: string) =>
-            `<label class="pc-field"><span>${escapeHtml(label)}</span><input name="${name}" type="${type}" autocomplete="${autocomplete}" required /></label>`;
+        this.gating = gating;
+        // Phone is collected by default (optional unless requirePhone). Consent
+        // checkboxes default to shown, explicit + unchecked (ADR-048 §a/§3).
+        const showPhone = resolved.requirePhone || resolved.collectPhone;
+        const field = (name: string, type: string, label: string, autocomplete: string, required: boolean) =>
+            `<label class="pc-field"><span>${escapeHtml(label)}</span><input name="${name}" type="${type}" autocomplete="${autocomplete}"${required ? ' required' : ''} /></label>`;
+        const consentBox = (name: string, label: string) =>
+            `<label class="pc-consent"><input name="${name}" type="checkbox" /><span>${escapeHtml(label)}</span></label>`;
+        const consentHtml = resolved.collectConsent
+            ? `<div class="pc-consents">
+                    ${consentBox('emailOptIn', 'Email me product news and offers.')}
+                    ${consentBox('smsOptIn', 'Text me updates by SMS. Message/data rates may apply.')}
+                </div>`
+            : '';
         const prechatHtml = `
             <div class="prechat">
                 <div class="pc-head">
@@ -251,12 +287,14 @@ export class SmoothAgentChatElement extends HTMLElement {
                     <div class="pc-sub">A couple details so ${escapeHtml(resolved.agentName)} can help.</div>
                 </div>
                 <form class="pc-form" novalidate>
-                    ${resolved.requireName ? field('name', 'text', 'Name', 'name') : ''}
-                    ${resolved.requireEmail ? field('email', 'email', 'Email', 'email') : ''}
-                    ${resolved.requirePhone ? field('phone', 'tel', 'Phone', 'tel') : ''}
+                    ${resolved.requireName ? field('name', 'text', 'Name', 'name', true) : ''}
+                    ${resolved.requireEmail ? field('email', 'email', 'Email', 'email', true) : ''}
+                    ${showPhone ? field('phone', 'tel', 'Phone', 'tel', resolved.requirePhone) : ''}
+                    ${consentHtml}
                     <button type="submit" class="pc-submit">Start chat</button>
                 </form>
             </div>`;
+        const restoreLink = this.allowChatRestore ? ` · <button type="button" class="restore-link">Restore my chats</button>` : '';
         const chatHtml = `
                 <div class="messages"></div>
                 <div class="interrupt hidden"></div>
@@ -265,7 +303,7 @@ export class SmoothAgentChatElement extends HTMLElement {
                         <textarea rows="1" placeholder="${escapeHtml(resolved.placeholder)}"></textarea>
                         <button class="send" type="button" aria-label="Send message">${ICON.send}</button>
                     </div>
-                    <div class="footer">powered by <b>smooth&#8209;operator</b></div>
+                    <div class="footer">powered by <b>smooth&#8209;operator</b>${restoreLink}</div>
                 </div>`;
 
         const container = document.createElement('div');
@@ -313,6 +351,21 @@ export class SmoothAgentChatElement extends HTMLElement {
             this.handlePrechatSubmit(pcForm as HTMLFormElement);
         });
 
+        // Cross-device "Restore my chats": open the panel + start the email entry.
+        // AWAIT connect() before showing the email step so a `sessionId` exists by
+        // the time the visitor submits — otherwise request-otp could go out with no
+        // session and verify-otp would then hard-error "No active session." The
+        // request-otp/verify-otp paths in the controller also require a session, so
+        // gating here keeps the affordance race-free.
+        container.querySelector('.restore-link')?.addEventListener('click', () => {
+            void (async () => {
+                this.identityRestore = { phase: 'awaiting_email' };
+                this.renderInterrupt();
+                // Establish a live session before the email entry can fire request-otp.
+                await this.controller?.connect().catch(() => {});
+            })();
+        });
+
         // Full-page mode connects eagerly (there's no launcher click to trigger it) —
         // but only once any identity gate is cleared.
         if (fullpage && !gating) void this.controller?.connect().catch(() => {});
@@ -335,6 +388,13 @@ export class SmoothAgentChatElement extends HTMLElement {
         el.replaceChildren();
         const it = this.interrupt;
         if (!it) {
+            // No mid-turn interrupt — but the cross-device restore flow may be
+            // active, which reuses this same overlay slot.
+            if (this.identityRestore.phase !== 'idle') {
+                el.classList.remove('hidden');
+                el.appendChild(this.buildRestoreCard());
+                return;
+            }
             el.classList.add('hidden');
             return;
         }
@@ -420,12 +480,189 @@ export class SmoothAgentChatElement extends HTMLElement {
         el.appendChild(card);
     }
 
-    /** Collect identity from the pre-chat form, then drop into the chat view. */
+    /**
+     * Build the cross-device "Restore my chats" card (ADR-048 §c). Reuses the
+     * same overlay slot + visual language as the OTP interrupt. All server-supplied
+     * strings (masked destination, conversation previews) are set via `textContent`
+     * — never innerHTML — so they can't inject markup; only the static lock icon
+     * uses innerHTML.
+     */
+    private buildRestoreCard(): HTMLElement {
+        const state = this.identityRestore;
+        const card = document.createElement('div');
+        card.className = 'int-card';
+
+        const head = document.createElement('div');
+        head.className = 'int-head';
+        const ico = document.createElement('span');
+        ico.className = 'int-ico';
+        ico.innerHTML = ICON.lock; // static, trusted
+        const title = document.createElement('span');
+        title.className = 'int-title';
+        title.textContent = 'Restore your chats';
+        head.append(ico, title);
+        card.appendChild(head);
+
+        const close = document.createElement('button');
+        close.className = 'int-close';
+        close.type = 'button';
+        close.setAttribute('aria-label', 'Cancel');
+        close.textContent = '×';
+        close.addEventListener('click', () => {
+            this.controller?.cancelIdentityRestore();
+            this.identityRestore = { phase: 'idle' };
+            this.renderInterrupt();
+        });
+        card.appendChild(close);
+
+        if (state.phase === 'awaiting_email') {
+            const desc = document.createElement('div');
+            desc.className = 'int-desc';
+            desc.textContent = "Enter your email and we'll send a code to find your previous chats.";
+            card.appendChild(desc);
+
+            const row = document.createElement('div');
+            row.className = 'int-row';
+            const input = document.createElement('input');
+            input.className = 'int-input';
+            input.type = 'email';
+            input.autocomplete = 'email';
+            input.placeholder = 'you@example.com';
+            const go = () => {
+                const email = input.value.trim();
+                if (email) void this.controller?.requestIdentityOtp(email, 'email');
+            };
+            input.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    go();
+                }
+            });
+            const send = document.createElement('button');
+            send.className = 'int-btn primary';
+            send.type = 'button';
+            send.textContent = 'Send code';
+            send.addEventListener('click', go);
+            row.append(input, send);
+            card.appendChild(row);
+            if (state.error) {
+                const err = document.createElement('div');
+                err.className = 'int-error';
+                err.textContent = state.error;
+                card.appendChild(err);
+            }
+            queueMicrotask(() => input.focus());
+        } else if (state.phase === 'requesting' || state.phase === 'verifying' || state.phase === 'resolving') {
+            const msg = document.createElement('div');
+            msg.className = 'int-sent';
+            msg.textContent = state.phase === 'requesting' ? 'Sending a code…' : state.phase === 'verifying' ? 'Verifying…' : 'Finding your chats…';
+            card.appendChild(msg);
+        } else if (state.phase === 'awaiting_code') {
+            if (state.maskedDestination) {
+                const sent = document.createElement('div');
+                sent.className = 'int-sent';
+                sent.textContent = `Code sent to ${state.maskedDestination}.`;
+                card.appendChild(sent);
+            }
+            const row = document.createElement('div');
+            row.className = 'int-row';
+            const input = document.createElement('input');
+            input.className = 'int-input';
+            input.type = 'text';
+            input.inputMode = 'numeric';
+            input.autocomplete = 'one-time-code';
+            input.placeholder = 'Enter code';
+            const submit = () => {
+                const code = input.value.trim();
+                if (code) void this.controller?.verifyIdentityOtp(code);
+            };
+            input.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    submit();
+                }
+            });
+            const verify = document.createElement('button');
+            verify.className = 'int-btn primary';
+            verify.type = 'button';
+            verify.textContent = 'Verify';
+            verify.addEventListener('click', submit);
+            row.append(input, verify);
+            card.appendChild(row);
+            if (state.error) {
+                const err = document.createElement('div');
+                err.className = 'int-error';
+                err.textContent = state.attemptsRemaining != null ? `${state.error} (${state.attemptsRemaining} left)` : state.error;
+                card.appendChild(err);
+            }
+            queueMicrotask(() => input.focus());
+        } else if (state.phase === 'resolved') {
+            if (state.conversations.length === 0) {
+                const none = document.createElement('div');
+                none.className = 'int-desc';
+                none.textContent = 'No previous chats found for that email.';
+                card.appendChild(none);
+            } else {
+                const pick = document.createElement('div');
+                pick.className = 'int-desc';
+                pick.textContent = 'Pick a conversation to continue:';
+                card.appendChild(pick);
+                const list = document.createElement('div');
+                list.className = 'restore-list';
+                for (const conv of state.conversations) {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'restore-item';
+                    const preview = document.createElement('span');
+                    preview.className = 'restore-preview';
+                    preview.textContent = conv.preview || 'Conversation';
+                    btn.appendChild(preview);
+                    if (conv.lastActivityAt) {
+                        const when = document.createElement('span');
+                        when.className = 'restore-when';
+                        when.textContent = this.formatWhen(conv.lastActivityAt);
+                        btn.appendChild(when);
+                    }
+                    btn.addEventListener('click', () => {
+                        void this.controller?.restoreConversation(conv.sessionId);
+                    });
+                    list.appendChild(btn);
+                }
+                card.appendChild(list);
+            }
+        } else if (state.phase === 'error') {
+            const err = document.createElement('div');
+            err.className = 'int-error';
+            err.textContent = state.message;
+            card.appendChild(err);
+        }
+
+        return card;
+    }
+
+    /** Format an ISO timestamp as a short, locale-aware label (best-effort). */
+    private formatWhen(iso: string): string {
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '';
+        try {
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        } catch {
+            return '';
+        }
+    }
+
+    /** Collect identity + consent from the pre-chat form, then drop into the chat view. */
     private handlePrechatSubmit(form: HTMLFormElement): void {
         if (!form.reportValidity()) return;
         const data = new FormData(form);
         const val = (k: string) => ((data.get(k) as string | null)?.trim() || undefined);
-        this.controller?.setUserInfo({ name: val('name'), email: val('email'), phone: val('phone') });
+        const checked = (k: string) => data.get(k) === 'on';
+        this.controller?.setUserInfo({
+            name: val('name'),
+            email: val('email'),
+            phone: val('phone'),
+            consent: { emailOptIn: checked('emailOptIn'), smsOptIn: checked('smsOptIn') },
+        });
         this.userInfoSatisfied = true;
         this.render();
         void this.controller?.connect().catch(() => {});

@@ -45,10 +45,18 @@ export default defineConfig([
         platform: 'browser',
         target: browserTarget,
         globalName: 'SmoothAgentChat',
-        deps: { alwaysBundle: [/@smooai\/smooth-operator/] },
+        // Bundle the protocol client AND zustand into the standalone global — a
+        // plain `<script>` embed has no module resolver, so every runtime dep must
+        // be inlined or it resolves to an undefined global at load.
+        deps: { alwaysBundle: [/@smooai\/smooth-operator/, /^zustand/] },
         alias: {
             '@smooai/smooth-operator': agentClientEntry,
         },
+        // zustand's persist middleware reads `import.meta.env.MODE` for a dev-only
+        // warning. The IIFE format has no `import.meta`; define it explicitly so the
+        // bundle is deterministic (production) and the EMPTY_IMPORT_META warning is
+        // suppressed, rather than relying on rolldown's `{}` fallback.
+        define: { 'import.meta.env': JSON.stringify({ MODE: 'production' }) },
         dts: false,
         sourcemap: true,
         clean: false,

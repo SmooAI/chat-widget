@@ -33,9 +33,23 @@ export type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config
 export { initChatWidgetLoader } from './loader-core.js';
 export {
     ConversationController,
+    httpBaseFromWsEndpoint,
     type ChatMessage,
     type Citation,
     type ConnectionStatus,
     type ConversationEvents,
+    type IdentityRestore,
+    type RestorableConversation,
     type Role,
+    type UserInfo,
 } from './conversation.js';
+export {
+    createWidgetStore,
+    PERSIST_VERSION,
+    storageKey,
+    type ConsentState,
+    type IdentityState,
+    type PersistedWidgetState,
+    type WidgetStore,
+} from './persistence.js';
+export { computeFingerprint, getOrCreateFingerprint } from './fingerprint.js';

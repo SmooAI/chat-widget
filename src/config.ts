@@ -71,6 +71,13 @@ export interface ChatWidgetConfig {
     userEmail?: string;
     /** Optional phone number for the user participant (passed via session metadata). */
     userPhone?: string;
+    /**
+     * Optional pre-auth HMAC context. When the host page has a shared secret with
+     * the agent, it can sign `{ userId, signature, timestamp }` so the chat-ws
+     * wrapper's `/internal/*` identity routes (and the WS create path) verify the
+     * caller without an OTP round-trip (ADR-046/ADR-048). Passed through verbatim.
+     */
+    authContext?: { userId: string; signature: string; timestamp: number };
     /** Placeholder text for the message input. */
     placeholder?: string;
     /** Greeting rendered when the conversation opens (before any messages). */
@@ -91,6 +98,24 @@ export interface ChatWidgetConfig {
     /** Require the visitor's phone before chatting. */
     requirePhone?: boolean;
     /**
+     * Show the phone field on the pre-chat form (optional unless {@link requirePhone}).
+     * Defaults to `true` for this widget — phone rides the session metadata as
+     * `userPhone` so the agent can follow up by SMS. Set `false` to hide it.
+     */
+    collectPhone?: boolean;
+    /**
+     * Show the email + SMS marketing-consent checkboxes on the pre-chat form.
+     * Explicit opt-in, default UNCHECKED; a `consentAt` timestamp is stamped when
+     * a box is ticked. Defaults to `true`. The consent record is threaded into the
+     * session metadata (ADR-048).
+     */
+    collectConsent?: boolean;
+    /**
+     * Offer the cross-device "Restore my chats" affordance — an explicit link that
+     * runs the identity-OTP → resolve → replay flow. Defaults to `true`.
+     */
+    allowChatRestore?: boolean;
+    /**
      * Let visitors chat without providing any identity. When `true`, the
      * `require*` flags are ignored and the pre-chat form is skipped.
      */
@@ -102,11 +127,12 @@ export interface ChatWidgetConfig {
 /** The fully-resolved theme (canonical keys only — aliases are folded in). */
 export type ResolvedTheme = Required<Omit<ChatWidgetTheme, 'chatBubbleInbound' | 'chatBubbleInboundText' | 'chatBubbleOutbound' | 'chatBubbleOutboundText'>>;
 
-export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone'>> & {
+export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone' | 'authContext'>> & {
     theme: ResolvedTheme;
     userName?: string;
     userEmail?: string;
     userPhone?: string;
+    authContext?: { userId: string; signature: string; timestamp: number };
 };
 
 /** Resolve a partial config against the built-in defaults. */
@@ -127,6 +153,7 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         userName: config.userName,
         userEmail: config.userEmail,
         userPhone: config.userPhone,
+        authContext: config.authContext,
         placeholder: config.placeholder ?? 'Type a message…',
         greeting: config.greeting ?? 'Hi! How can I help you today?',
         connectionErrorMessage: config.connectionErrorMessage ?? "We couldn't reach the chat. Please try again in a moment.",
@@ -135,6 +162,9 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         requireName: config.requireName ?? false,
         requireEmail: config.requireEmail ?? false,
         requirePhone: config.requirePhone ?? false,
+        collectPhone: config.collectPhone ?? true,
+        collectConsent: config.collectConsent ?? true,
+        allowChatRestore: config.allowChatRestore ?? true,
         allowAnonymous: config.allowAnonymous ?? false,
         theme: {
             text: theme.text ?? '#f8fafc',
