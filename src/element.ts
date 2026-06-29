@@ -14,6 +14,7 @@
  *   <smooth-agent-chat endpoint="ws://localhost:8787/ws" agent-id="…"></smooth-agent-chat>
  * or programmatically via {@link mountChatWidget}.
  */
+import { AsYouType, isValidPhoneNumber, parsePhoneNumber } from 'libphonenumber-js/min';
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { needsUserInfo, resolveConfig } from './config.js';
 import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type IdentityRestore, type Interrupt } from './conversation.js';
@@ -22,6 +23,31 @@ import { cleanCitationSnippet, escapeHtml, renderMarkdown, safeHttpUrl } from '.
 import { buildStyles } from './styles.js';
 
 export const ELEMENT_TAG = 'smooth-agent-chat';
+
+/**
+ * Default region for phone parsing/formatting on the pre-chat form. The widget
+ * is US-first; the backend does the authoritative E.164 normalization (SMOODEV-2153),
+ * so this only governs the as-you-type display + the inline validity hint and the
+ * best-effort E.164 we send when the number already parses as valid.
+ */
+const PHONE_DEFAULT_REGION = 'US' as const;
+
+/**
+ * Best-effort E.164 for an as-typed phone number. Returns the canonical
+ * `+1…` form when the value parses to a valid number in {@link PHONE_DEFAULT_REGION},
+ * otherwise `null` (caller falls back to sending the raw value — the backend
+ * re-parses and normalizes/nulls authoritatively).
+ */
+function phoneToE164(value: string): string | null {
+    const v = value.trim();
+    if (!v) return null;
+    try {
+        if (!isValidPhoneNumber(v, PHONE_DEFAULT_REGION)) return null;
+        return parsePhoneNumber(v, PHONE_DEFAULT_REGION).number;
+    } catch {
+        return null;
+    }
+}
 
 const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'placeholder', 'greeting', 'start-open', 'mode'] as const;
 
@@ -270,8 +296,10 @@ export class SmoothAgentChatElement extends HTMLElement {
         // Phone is collected by default (optional unless requirePhone). Consent
         // checkboxes default to shown, explicit + unchecked (ADR-048 §a/§3).
         const showPhone = resolved.requirePhone || resolved.collectPhone;
-        const field = (name: string, type: string, label: string, autocomplete: string, required: boolean) =>
-            `<label class="pc-field"><span>${escapeHtml(label)}</span><input name="${name}" type="${type}" autocomplete="${autocomplete}"${required ? ' required' : ''} /></label>`;
+        const field = (name: string, type: string, label: string, autocomplete: string, required: boolean, hint = false) =>
+            `<label class="pc-field"><span>${escapeHtml(label)}</span><input name="${name}" type="${type}" autocomplete="${autocomplete}"${required ? ' required' : ''} />${
+                hint ? '<span class="pc-hint" aria-live="polite"></span>' : ''
+            }</label>`;
         const consentBox = (name: string, label: string) =>
             `<label class="pc-consent"><input name="${name}" type="checkbox" /><span>${escapeHtml(label)}</span></label>`;
         const consentHtml = resolved.collectConsent
@@ -289,7 +317,7 @@ export class SmoothAgentChatElement extends HTMLElement {
                 <form class="pc-form" novalidate>
                     ${resolved.requireName ? field('name', 'text', 'Name', 'name', true) : ''}
                     ${resolved.requireEmail ? field('email', 'email', 'Email', 'email', true) : ''}
-                    ${showPhone ? field('phone', 'tel', 'Phone', 'tel', resolved.requirePhone) : ''}
+                    ${showPhone ? field('phone', 'tel', 'Phone', 'tel', resolved.requirePhone, true) : ''}
                     ${consentHtml}
                     <button type="submit" class="pc-submit">Start chat</button>
                 </form>
@@ -350,6 +378,12 @@ export class SmoothAgentChatElement extends HTMLElement {
             ev.preventDefault();
             this.handlePrechatSubmit(pcForm as HTMLFormElement);
         });
+
+        // Live phone formatting + validity hint (libphonenumber-js, US default).
+        // The implicit <label>, type="tel", and autocomplete="tel" from field()
+        // are preserved — autofill keeps working — and we also reformat on
+        // `change` so a browser-autofilled value gets formatted/validated too.
+        this.wirePhoneField(pcForm as HTMLFormElement | null);
 
         // Cross-device "Restore my chats": open the panel + start the email entry.
         // AWAIT connect() before showing the email step so a `sessionId` exists by
@@ -651,16 +685,97 @@ export class SmoothAgentChatElement extends HTMLElement {
         }
     }
 
+    /**
+     * Wire as-you-type formatting + an inline validity hint onto the pre-chat
+     * phone input (libphonenumber-js, US default region). Autofill is preserved:
+     * the input keeps its `type="tel"` + `autocomplete="tel"` + implicit <label>,
+     * and we also reformat on `change` so a browser-autofilled value gets
+     * formatted/validated too.
+     *
+     * As-you-type caret note: `AsYouType` reformats the entire string, which
+     * moves the caret to the end on a mid-string edit. To avoid fighting the
+     * user, we only rewrite the value when the caret is at the end (the typical
+     * append-a-digit case) and never on a deletion — so backspacing the
+     * formatting characters works naturally.
+     */
+    private wirePhoneField(form: HTMLFormElement | null): void {
+        const input = form?.querySelector('input[name="phone"]') as HTMLInputElement | null;
+        if (!input) return;
+        const hint = input.parentElement?.querySelector('.pc-hint') as HTMLElement | null;
+
+        const updateHint = () => {
+            const v = input.value.trim();
+            const field = input.closest('.pc-field');
+            if (!v) {
+                // Empty is neutral — the field is optional unless requirePhone.
+                field?.classList.remove('valid', 'invalid');
+                if (hint) hint.textContent = '';
+                return;
+            }
+            const ok = isValidPhoneNumber(v, PHONE_DEFAULT_REGION);
+            field?.classList.toggle('valid', ok);
+            field?.classList.toggle('invalid', !ok);
+            if (hint) hint.textContent = ok ? '' : 'Enter a valid phone number';
+        };
+
+        const reformat = () => {
+            const atEnd = input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
+            // Only reformat when appending at the end; never fight a mid-string
+            // edit or a deletion (see the caret note above).
+            if (atEnd) {
+                const formatted = new AsYouType(PHONE_DEFAULT_REGION).input(input.value);
+                // Avoid clobbering when the user is deleting: only grow/normalize,
+                // not when the formatter would re-add a character they just removed.
+                if (formatted.length >= input.value.length) {
+                    input.value = formatted;
+                }
+            }
+            updateHint();
+        };
+
+        input.addEventListener('input', (ev) => {
+            const ie = ev as InputEvent;
+            // Don't reformat while deleting — let the user clear characters freely.
+            if (typeof ie.inputType === 'string' && ie.inputType.startsWith('delete')) {
+                updateHint();
+                return;
+            }
+            reformat();
+        });
+        // Browser autofill / paste-then-blur lands here; format + validate it too.
+        input.addEventListener('change', reformat);
+    }
+
     /** Collect identity + consent from the pre-chat form, then drop into the chat view. */
     private handlePrechatSubmit(form: HTMLFormElement): void {
         if (!form.reportValidity()) return;
         const data = new FormData(form);
         const val = (k: string) => ((data.get(k) as string | null)?.trim() || undefined);
         const checked = (k: string) => data.get(k) === 'on';
+
+        // Phone: when required, block on an invalid number and surface the hint.
+        // When optional, allow submit — the backend normalizes/nulls authoritatively.
+        const rawPhone = val('phone');
+        const phoneInput = form.querySelector('input[name="phone"]') as HTMLInputElement | null;
+        if (rawPhone && phoneInput && !isValidPhoneNumber(rawPhone, PHONE_DEFAULT_REGION)) {
+            const required = phoneInput.hasAttribute('required');
+            const field = phoneInput.closest('.pc-field');
+            field?.classList.add('invalid');
+            const hint = field?.querySelector('.pc-hint');
+            if (hint) hint.textContent = 'Enter a valid phone number';
+            if (required) {
+                phoneInput.focus();
+                return;
+            }
+        }
+        // Prefer canonical E.164 when it parses; fall back to the raw value
+        // otherwise (the backend re-parses + normalizes either way).
+        const phone = rawPhone ? (phoneToE164(rawPhone) ?? rawPhone) : undefined;
+
         this.controller?.setUserInfo({
             name: val('name'),
             email: val('email'),
-            phone: val('phone'),
+            phone,
             consent: { emailOptIn: checked('emailOptIn'), smsOptIn: checked('smsOptIn') },
         });
         this.userInfoSatisfied = true;

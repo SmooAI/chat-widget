@@ -116,4 +116,138 @@ describe('<smooth-agent-chat> render', () => {
         expect(overlay?.classList.contains('hidden')).toBe(true);
         expect(overlay?.childElementCount).toBe(0);
     });
+
+    describe('pre-chat phone field (libphonenumber-js, US default)', () => {
+        // Mount with the phone field present (requireName forces the gate; phone
+        // shows by default via collectPhone). Returns the input + its field wrapper.
+        function mountPhone(cfg: Record<string, unknown> = {}): {
+            el: HTMLElement;
+            sr: ShadowRoot;
+            input: HTMLInputElement;
+            field: HTMLElement;
+            hint: HTMLElement;
+        } {
+            const el = mountCfg({ requireName: true, ...cfg });
+            const sr = el.shadowRoot!;
+            const input = sr.querySelector('input[name="phone"]') as HTMLInputElement;
+            const field = input.closest('.pc-field') as HTMLElement;
+            const hint = field.querySelector('.pc-hint') as HTMLElement;
+            return { el, sr, input, field, hint };
+        }
+
+        // jsdom doesn't synthesize InputEvent.inputType; pass it explicitly.
+        function type(input: HTMLInputElement, value: string, inputType = 'insertText'): void {
+            input.value = value;
+            input.setSelectionRange(value.length, value.length);
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType }));
+        }
+
+        // Stub the controller seam so submit captures setUserInfo without a real
+        // WebSocket. `disconnect` is needed for the afterEach teardown (the element's
+        // disconnectedCallback calls it).
+        function stubController(el: HTMLElement): Array<Record<string, unknown>> {
+            const captured: Array<Record<string, unknown>> = [];
+            (el as unknown as { controller: unknown }).controller = {
+                setUserInfo: (i: Record<string, unknown>) => captured.push(i),
+                connect: () => Promise.resolve(),
+                disconnect: () => {},
+            };
+            return captured;
+        }
+
+        it('preserves autofill-critical attributes: type=tel, autocomplete=tel, and the implicit <label>', () => {
+            const { input, field } = mountPhone();
+            expect(input.type).toBe('tel');
+            expect(input.getAttribute('autocomplete')).toBe('tel');
+            // Implicit label association: the input is nested inside its <label>.
+            expect(field.tagName).toBe('LABEL');
+            expect(field.querySelector('span')?.textContent).toBe('Phone');
+            expect(field.contains(input)).toBe(true);
+        });
+
+        it('formats a US number as-you-type when typing at the end', () => {
+            const { input } = mountPhone();
+            type(input, '2133734253');
+            // libphonenumber-js AsYouType('US') → "(213) 373-4253".
+            expect(input.value).toBe('(213) 373-4253');
+        });
+
+        it('flags a garbage number invalid and a good number valid via the inline hint', () => {
+            const { input, field, hint } = mountPhone();
+            type(input, '12'); // too short → invalid
+            expect(field.classList.contains('invalid')).toBe(true);
+            expect(field.classList.contains('valid')).toBe(false);
+            expect(hint.textContent).toBeTruthy();
+
+            type(input, '2133734253'); // valid US number
+            expect(field.classList.contains('valid')).toBe(true);
+            expect(field.classList.contains('invalid')).toBe(false);
+            expect(hint.textContent).toBe('');
+        });
+
+        it('empty phone is neutral (no valid/invalid) — the field is optional', () => {
+            const { input, field } = mountPhone();
+            type(input, '2133734253');
+            type(input, '', 'deleteContentBackward');
+            expect(field.classList.contains('valid')).toBe(false);
+            expect(field.classList.contains('invalid')).toBe(false);
+        });
+
+        it('does not reformat while the user is deleting characters', () => {
+            const { input } = mountPhone();
+            type(input, '2133734253'); // → "(213) 373-4253"
+            // Simulate a backspace that removed the trailing digit.
+            type(input, '(213) 373-425', 'deleteContentBackward');
+            // Value is left as the user typed it — we don't re-add formatting.
+            expect(input.value).toBe('(213) 373-425');
+        });
+
+        it('reformats + validates a browser-autofilled value on `change`', () => {
+            const { input, field } = mountPhone();
+            input.value = '2133734253';
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            expect(input.value).toBe('(213) 373-4253');
+            expect(field.classList.contains('valid')).toBe(true);
+        });
+
+        it('sends E.164 on submit when the (formatted) number is valid', () => {
+            const { el, sr, input } = mountPhone();
+            const captured = stubController(el);
+            (sr.querySelector('input[name="name"]') as HTMLInputElement).value = 'Ada';
+            type(input, '(213) 373-4253');
+            (sr.querySelector('.pc-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            expect(captured).toHaveLength(1);
+            expect(captured[0]?.phone).toBe('+12133734253');
+        });
+
+        it('blocks submit on an invalid number when requirePhone is set', () => {
+            const { el, sr, input, field } = mountPhone({ requirePhone: true });
+            const captured = stubController(el);
+            (sr.querySelector('input[name="name"]') as HTMLInputElement).value = 'Ada';
+            type(input, '12'); // invalid
+            const form = sr.querySelector('.pc-form') as HTMLFormElement;
+            // reportValidity is unavailable in jsdom for this path; stub to true so we
+            // exercise our own phone gate rather than the native required check.
+            form.reportValidity = () => true;
+            form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            expect(captured).toHaveLength(0);
+            expect(field.classList.contains('invalid')).toBe(true);
+        });
+
+        it('allows submit with the raw value when phone is optional + unparseable', () => {
+            const { el, sr, input } = mountPhone();
+            const captured = stubController(el);
+            (sr.querySelector('input[name="name"]') as HTMLInputElement).value = 'Ada';
+            type(input, '12'); // invalid but optional — formatter renders it "1 2"
+            const form = sr.querySelector('.pc-form') as HTMLFormElement;
+            form.reportValidity = () => true;
+            form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            // Optional → submit proceeds; the unparseable value is forwarded as-is
+            // (the field's current, as-you-type-formatted text) so the backend
+            // normalizes/nulls authoritatively.
+            expect(captured).toHaveLength(1);
+            expect(captured[0]?.phone).toBe(input.value);
+            expect(captured[0]?.phone).not.toMatch(/^\+/); // not E.164 — it didn't parse
+        });
+    });
 });

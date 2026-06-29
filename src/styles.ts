@@ -515,6 +515,24 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
     border-color: color-mix(in srgb, var(--sac-primary) 60%, transparent);
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-primary) 14%, transparent);
 }
+/* Inline phone validity — subtle, themed. Empty stays neutral (optional field). */
+.pc-field.valid input {
+    border-color: color-mix(in srgb, var(--sac-primary) 55%, #2faa6a 45%);
+}
+.pc-field.invalid input {
+    border-color: color-mix(in srgb, #e2566b 62%, var(--sac-border) 38%);
+}
+.pc-field.invalid input:focus {
+    box-shadow: 0 0 0 4px color-mix(in srgb, #e2566b 16%, transparent);
+}
+.pc-field .pc-hint {
+    min-height: 13px;
+    margin-top: 1px;
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1.2;
+    color: color-mix(in srgb, #e2566b 78%, var(--sac-text) 22%);
+}
 .pc-submit {
     margin-top: 4px;
     border: none;

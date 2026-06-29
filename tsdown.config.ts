@@ -45,10 +45,13 @@ export default defineConfig([
         platform: 'browser',
         target: browserTarget,
         globalName: 'SmoothAgentChat',
-        // Bundle the protocol client AND zustand into the standalone global — a
-        // plain `<script>` embed has no module resolver, so every runtime dep must
-        // be inlined or it resolves to an undefined global at load.
-        deps: { alwaysBundle: [/@smooai\/smooth-operator/, /^zustand/] },
+        // Bundle the protocol client, zustand, AND libphonenumber-js into the
+        // standalone global — a plain `<script>` embed has no module resolver, so
+        // every runtime dep must be inlined or it resolves to an undefined global
+        // at load. (Without the libphonenumber-js entry the IIFE leaves a bare
+        // `libphonenumber_js_min` external reference → ReferenceError on the
+        // pre-chat form's phone validation. SMOODEV-2153.)
+        deps: { alwaysBundle: [/@smooai\/smooth-operator/, /^zustand/, /^libphonenumber-js/] },
         alias: {
             '@smooai/smooth-operator': agentClientEntry,
         },
