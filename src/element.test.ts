@@ -77,6 +77,35 @@ describe('<smooth-agent-chat> render', () => {
         expect(sr.querySelector('.close')).toBeNull();
     });
 
+    it('full-page header defaults to the square Smooth icon (not the wide wordmark)', () => {
+        const sr = mount({ endpoint: 'wss://e/ws', 'agent-id': 'a1', mode: 'fullpage' }).shadowRoot!;
+        const svg = sr.querySelector('.header .avatar .logo-wrap svg');
+        expect(svg).not.toBeNull();
+        // The square icon has a 150×150 viewBox; the retired wordmark was 550×135.
+        expect(svg?.getAttribute('viewBox')).toBe('0 0 150 150');
+        // No brand <img> when no logoUrl is set.
+        expect(sr.querySelector('.header .logo-img')).toBeNull();
+    });
+
+    it('full-page header renders a brand <img> when a safe logoUrl is set', () => {
+        const sr = mountCfg({ mode: 'fullpage', logoUrl: 'https://cdn.example.com/logo.png' }).shadowRoot!;
+        const img = sr.querySelector('.header .avatar .logo-img') as HTMLImageElement | null;
+        expect(img).not.toBeNull();
+        expect(img?.getAttribute('src')).toBe('https://cdn.example.com/logo.png');
+        // The default icon is not rendered when a logo image takes over.
+        expect(sr.querySelector('.header .avatar .logo-wrap svg')).toBeNull();
+    });
+
+    it('ignores a javascript:/data: logoUrl (XSS guard) and falls back to the icon', () => {
+        // eslint-disable-next-line no-script-url
+        const sr = mountCfg({ mode: 'fullpage', logoUrl: 'javascript:alert(1)' }).shadowRoot!;
+        expect(sr.querySelector('.header .logo-img')).toBeNull();
+        expect(sr.querySelector('.header .avatar .logo-wrap svg')?.getAttribute('viewBox')).toBe('0 0 150 150');
+
+        const sr2 = mountCfg({ mode: 'fullpage', logoUrl: 'data:text/html,<script>alert(1)</script>' }).shadowRoot!;
+        expect(sr2.querySelector('.header .logo-img')).toBeNull();
+    });
+
     // Configure non-attribute options (examplePrompts / require*) before mount.
     function mountCfg(cfg: Record<string, unknown>): HTMLElement {
         defineChatWidget();

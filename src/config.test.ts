@@ -68,6 +68,15 @@ describe('resolveConfig', () => {
         const r = resolveConfig({ ...base, examplePrompts: ['a', '  ', 'b', 'c', 'd', 'e', 'f'] });
         expect(r.examplePrompts).toEqual(['a', 'b', 'c', 'd', 'e']);
     });
+
+    it('keeps a safe http(s) logoUrl and drops dangerous/relative ones (XSS guard)', () => {
+        expect(resolveConfig({ ...base, logoUrl: 'https://cdn.example.com/l.png' }).logoUrl).toBe('https://cdn.example.com/l.png');
+        // eslint-disable-next-line no-script-url
+        expect(resolveConfig({ ...base, logoUrl: 'javascript:alert(1)' }).logoUrl).toBeUndefined();
+        expect(resolveConfig({ ...base, logoUrl: 'data:text/html,<script>' }).logoUrl).toBeUndefined();
+        expect(resolveConfig({ ...base, logoUrl: '/relative/logo.png' }).logoUrl).toBeUndefined();
+        expect(resolveConfig(base).logoUrl).toBeUndefined();
+    });
 });
 
 describe('needsUserInfo', () => {

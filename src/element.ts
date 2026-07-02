@@ -18,7 +18,7 @@ import { AsYouType, isValidPhoneNumber, parsePhoneNumber } from 'libphonenumber-
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { needsUserInfo, resolveConfig } from './config.js';
 import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type IdentityRestore, type Interrupt } from './conversation.js';
-import { SMOOTH_LOGO_SVG } from './logo.js';
+import { SMOOTH_ICON_SVG } from './logo.js';
 import { cleanCitationSnippet, escapeHtml, renderMarkdown, safeHttpUrl } from './markdown.js';
 import { buildStyles } from './styles.js';
 
@@ -49,7 +49,7 @@ function phoneToE164(value: string): string | null {
     }
 }
 
-const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'placeholder', 'greeting', 'start-open', 'mode'] as const;
+const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'logo-url', 'placeholder', 'greeting', 'start-open', 'mode'] as const;
 
 /**
  * Inline SVG icons (static, trusted strings — never interpolated with user data).
@@ -195,6 +195,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             mode,
             agentId,
             agentName: this.overrides.agentName ?? this.getAttribute('agent-name') ?? undefined,
+            logoUrl: this.overrides.logoUrl ?? this.getAttribute('logo-url') ?? undefined,
             userName: this.overrides.userName,
             userEmail: this.overrides.userEmail,
             userPhone: this.overrides.userPhone,
@@ -264,13 +265,19 @@ export class SmoothAgentChatElement extends HTMLElement {
         const style = document.createElement('style');
         style.textContent = buildStyles(resolved.theme, resolved.mode);
 
-        // Header: in full-page mode lead with the Smooth logo in the avatar tile
+        // Header: in full-page mode lead with the brand logo in the avatar tile
         // and a subtle "powered by" tag; in popover mode show a brand-colored
-        // monogram avatar + a compact close (collapse) button.
+        // monogram avatar + a compact close (collapse) button. The logo defaults
+        // to the square Smooth icon, but a host page can override it with
+        // `logoUrl` (already sanitized to http(s)-only by resolveConfig; escaped
+        // here so it can't break out of the src attribute).
         const monogram = escapeHtml((resolved.agentName.trim().charAt(0) || 'A').toUpperCase());
+        const headerLogo = resolved.logoUrl
+            ? `<img src="${escapeHtml(resolved.logoUrl)}" alt="" class="logo-img" />`
+            : SMOOTH_ICON_SVG;
         const header = fullpage
             ? `<div class="header">
-                    <div class="avatar"><span class="logo-wrap">${SMOOTH_LOGO_SVG}</span></div>
+                    <div class="avatar"><span class="logo-wrap">${headerLogo}</span></div>
                     <div class="meta">
                         <span class="title">${escapeHtml(resolved.agentName)}</span>
                         <span class="status"><span class="dot off"></span><span class="status-text"></span></span>

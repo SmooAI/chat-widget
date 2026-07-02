@@ -176,8 +176,9 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
         0 1px 0 rgba(255, 255, 255, .25) inset;
 }
 .avatar svg { width: 22px; height: 22px; }
-.avatar .logo-wrap { display: flex; }
+.avatar .logo-wrap { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }
 .avatar .logo { height: 22px; width: auto; display: block; }
+.avatar .logo-img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block; border-radius: 9px; }
 .meta { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .title { font-weight: 650; font-size: 15.5px; letter-spacing: -.01em; line-height: 1.1; }
 .status {
@@ -226,6 +227,7 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
 .panel.fullpage .header { padding: 18px 22px; }
 .panel.fullpage .avatar { width: 44px; height: 44px; }
 .panel.fullpage .avatar .logo { height: 26px; }
+.panel.fullpage .avatar svg { width: 28px; height: 28px; }
 
 /* ────────────────────────────── Messages ──────────────────────────── */
 .messages {

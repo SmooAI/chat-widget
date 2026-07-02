@@ -5,6 +5,8 @@
  * `<smooth-agent-chat>` element) or programmatically (passing this object to
  * {@link mountChatWidget} / `element.configure(...)`).
  */
+import { safeHttpUrl } from './markdown.js';
+
 export interface ChatWidgetTheme {
     /** Foreground text color for the widget chrome. */
     text?: string;
@@ -65,6 +67,13 @@ export interface ChatWidgetConfig {
     agentId: string;
     /** Display name for the agent (header label). Defaults to "Assistant". */
     agentName?: string;
+    /**
+     * Brand logo shown in the full-page header avatar tile; falls back to the
+     * Smooth icon. SECURITY: only absolute `http(s)` URLs are honored — any other
+     * scheme (`javascript:`/`data:`/…) is ignored, so a hostile config can't
+     * inject script.
+     */
+    logoUrl?: string;
     /** Optional display name for the user participant. */
     userName?: string;
     /** Optional email address for the user participant. */
@@ -127,12 +136,14 @@ export interface ChatWidgetConfig {
 /** The fully-resolved theme (canonical keys only — aliases are folded in). */
 export type ResolvedTheme = Required<Omit<ChatWidgetTheme, 'chatBubbleInbound' | 'chatBubbleInboundText' | 'chatBubbleOutbound' | 'chatBubbleOutboundText'>>;
 
-export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone' | 'authContext'>> & {
+export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone' | 'authContext' | 'logoUrl'>> & {
     theme: ResolvedTheme;
     userName?: string;
     userEmail?: string;
     userPhone?: string;
     authContext?: { userId: string; signature: string; timestamp: number };
+    /** Sanitized brand logo URL (`http(s)` only) or `undefined` — see {@link ChatWidgetConfig.logoUrl}. */
+    logoUrl?: string;
 };
 
 /** Resolve a partial config against the built-in defaults. */
@@ -150,6 +161,9 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         mode: config.mode ?? 'popover',
         agentId: config.agentId,
         agentName: config.agentName ?? 'Assistant',
+        // Only absolute http(s) URLs survive — anything else (javascript:/data:/
+        // relative) is dropped so the header can never render a hostile logo src.
+        logoUrl: safeHttpUrl(config.logoUrl) ?? undefined,
         userName: config.userName,
         userEmail: config.userEmail,
         userPhone: config.userPhone,
