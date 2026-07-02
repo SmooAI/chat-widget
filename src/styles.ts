@@ -44,11 +44,11 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
     ${
         mode === 'fullpage'
             ? `/* Full-page: fill the host's box (sized by its container, else the viewport). */
-    display: block;
+    display: flex;
+    flex-direction: column;
     position: relative;
     width: 100%;
-    height: 100%;
-    min-height: 100vh;`
+    height: 100%;`
             : `/* Popover: float in the bottom-right corner. */
     position: fixed;
     bottom: 24px;
@@ -58,7 +58,24 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
 }
-
+${
+    mode === 'fullpage'
+        ? `
+/* Viewport fallback — the element sets this attribute only when the host's
+   container gives it no resolved height (e.g. mounted straight into an
+   auto-height <body>). A sized container always wins, so an embed inside a
+   fixed-height box never overflows it (composer stays visible). */
+:host([data-viewport-fallback]) { min-height: 100dvh; }
+/* The render wrapper passes the host's box down to the panel via flex. */
+.wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+`
+        : ''
+}
 * { box-sizing: border-box; }
 
 /* ───────────────────────────── Launcher ───────────────────────────── */
@@ -140,11 +157,13 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
     pointer-events: none;
     background: radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--sac-primary) 22%, transparent), transparent 70%);
 }
-/* Full-page: the panel becomes the whole surface. */
+/* Full-page: the panel becomes the whole surface — it follows the host's box
+   (via the .wrap flex chain), never a hardcoded viewport unit. */
 .panel.fullpage {
     width: 100%;
-    height: 100%;
-    min-height: 100vh;
+    flex: 1;
+    height: auto;
+    min-height: 0;
     max-width: none;
     max-height: none;
     border: none;

@@ -342,6 +342,7 @@ export class SmoothAgentChatElement extends HTMLElement {
                 </div>`;
 
         const container = document.createElement('div');
+        container.className = 'wrap';
         container.innerHTML = `
             ${fullpage ? '' : `<button class="launcher" part="launcher" aria-label="Open chat">${ICON.spark}</button>`}
             <div class="panel${fullpage ? ' fullpage' : ' hidden'}" part="panel" role="${fullpage ? 'region' : 'dialog'}" aria-label="${escapeHtml(resolved.agentName)} chat">
@@ -406,6 +407,10 @@ export class SmoothAgentChatElement extends HTMLElement {
                 await this.controller?.connect().catch(() => {});
             })();
         });
+
+        // Full-page mode sizes to the host's box; fall back to the viewport only
+        // when the container gives the host no height.
+        if (fullpage) this.syncViewportFallback();
 
         // Full-page mode connects eagerly (there's no launcher click to trigger it) —
         // but only once any identity gate is cleared.
@@ -996,6 +1001,25 @@ export class SmoothAgentChatElement extends HTMLElement {
             this.displayedLength = this.streamTarget.length;
             this.streamBubbleEl.textContent = this.streamTarget;
         }
+    }
+
+    /**
+     * Full-page sizing probe: decide whether the host's container gives it a
+     * real box. With the `.wrap` flex chain hidden, `height: 100%` of a SIZED
+     * container still resolves (clientHeight > 0), while an auto-height parent
+     * (e.g. mounted straight into `<body>`) collapses to ~0. Only the latter
+     * gets `data-viewport-fallback`, whose CSS applies `min-height: 100dvh` —
+     * so an embed inside a fixed-height box never overflows it (the composer
+     * stays visible), and a bare full-page route still fills the viewport.
+     */
+    private syncViewportFallback(): void {
+        const wrap = this.shadowRoot?.querySelector<HTMLElement>('.wrap');
+        if (!wrap) return;
+        const prev = wrap.style.display;
+        wrap.style.display = 'none';
+        const heightless = this.clientHeight < 8;
+        wrap.style.display = prev;
+        this.toggleAttribute('data-viewport-fallback', heightless);
     }
 
     /** Cancel any in-flight reveal loop and clear its state (called on full rebuild). */
