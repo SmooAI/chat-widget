@@ -26,11 +26,18 @@ describe('buildStyles', () => {
         expect(css).toContain('bottom: 24px');
     });
 
-    it('fills its container (not fixed) in fullpage mode', () => {
+    it('fills its container (not fixed) in fullpage mode — no unconditional viewport unit', () => {
         const css = buildStyles(theme, 'fullpage');
         // The fullpage :host fills its container instead of pinning to the viewport.
         expect(css).not.toContain('position: fixed');
-        expect(css).toContain('min-height: 100vh');
+        // Regression (composer clipped inside fixed-height containers): fullpage
+        // must NOT hardcode a viewport min-height on the host or panel …
+        expect(css).not.toContain('min-height: 100vh');
+        // … only the attribute-gated fallback for auto-height mounts remains,
+        expect(css).toContain(':host([data-viewport-fallback]) { min-height: 100dvh; }');
+        // and the .wrap flex chain hands the host's box down to the panel.
+        expect(css).toContain('.wrap {');
+        expect(css).toMatch(/\.panel\.fullpage \{[^}]*flex: 1/);
     });
 
     it('always ships the launcher, panel, typing indicator, and reduced-motion guard', () => {

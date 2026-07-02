@@ -280,3 +280,37 @@ describe('<smooth-agent-chat> render', () => {
         });
     });
 });
+
+describe('fullpage container sizing (composer-clip regression)', () => {
+    afterEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    function mountFullpage(clientHeight: number): HTMLElement {
+        defineChatWidget();
+        const el = document.createElement(ELEMENT_TAG);
+        // jsdom has no layout: emulate what a sized container (positive) vs an
+        // auto-height <body> mount (0) resolves the host's box to.
+        Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true });
+        el.setAttribute('endpoint', 'wss://e/ws');
+        el.setAttribute('agent-id', 'a1');
+        el.setAttribute('mode', 'fullpage');
+        document.body.appendChild(el);
+        return el;
+    }
+
+    it('renders the .wrap flex chain that hands the host box to the panel', () => {
+        const el = mountFullpage(600);
+        expect(el.shadowRoot!.querySelector('.wrap .panel.fullpage')).not.toBeNull();
+    });
+
+    it('does NOT apply the viewport fallback when the container gives the host a box', () => {
+        const el = mountFullpage(600);
+        expect(el.hasAttribute('data-viewport-fallback')).toBe(false);
+    });
+
+    it('applies the viewport fallback when the container gives the host no height (bare body mount)', () => {
+        const el = mountFullpage(0);
+        expect(el.hasAttribute('data-viewport-fallback')).toBe(true);
+    });
+});
