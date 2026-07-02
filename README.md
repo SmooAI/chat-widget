@@ -223,6 +223,7 @@ Declarative attributes mirror the programmatic [`ChatWidgetConfig`](./src/config
 | `endpoint`      | `endpoint`       | **Required.** smooth-operator WebSocket URL.       |
 | `agent-id`      | `agentId`        | **Required.** UUID of the agent.                   |
 | `agent-name`    | `agentName`      | Header label + monogram. Default `Assistant`.      |
+| `logo-url`      | `logoUrl`        | Brand logo in the full-page header tile (`http(s)` only). Falls back to the Smooth icon. |
 | `placeholder`   | `placeholder`    | Composer placeholder.                              |
 | `greeting`      | `greeting`       | Shown before the first message.                    |
 | `mode`          | `mode`           | `popover` (default) or `fullpage`.                 |
