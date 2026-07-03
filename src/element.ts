@@ -97,6 +97,8 @@ export class SmoothAgentChatElement extends HTMLElement {
     private hasSent = false;
     /** Starter prompts shown as chips in the empty state. */
     private examplePrompts: string[] = [];
+    /** Whether mid-conversation suggested-reply chips are shown (config). */
+    private showSuggestedReplies = true;
     /** Resolved greeting text, cached so async (rAF) renders can reuse it. */
     private greeting = '';
     /** Current mid-turn interrupt (OTP / tool-confirmation), or null. */
@@ -117,6 +119,7 @@ export class SmoothAgentChatElement extends HTMLElement {
     private dotEl: HTMLElement | null = null;
     private inputEl: HTMLTextAreaElement | null = null;
     private sendBtn: HTMLButtonElement | null = null;
+    private suggestionsEl: HTMLElement | null = null;
 
     // ── Smooth streaming reveal ──
     // Tokens arrive in variable-size bursts at uneven rates, so revealing text in
@@ -209,6 +212,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             startOpen: this.overrides.startOpen ?? this.hasAttribute('start-open'),
             hideBranding: this.overrides.hideBranding ?? this.hasAttribute('hide-branding'),
             examplePrompts: this.overrides.examplePrompts,
+            showSuggestedReplies: this.overrides.showSuggestedReplies,
             requireName: this.overrides.requireName,
             requireEmail: this.overrides.requireEmail,
             requirePhone: this.overrides.requirePhone,
@@ -247,10 +251,14 @@ export class SmoothAgentChatElement extends HTMLElement {
                 onInterrupt: (interrupt) => {
                     this.interrupt = interrupt;
                     this.renderInterrupt();
+                    // Suggestion chips are hidden while an interrupt overlay is up.
+                    this.renderSuggestions();
                 },
                 onIdentityRestore: (state) => {
                     this.identityRestore = state;
                     this.renderInterrupt();
+                    // The restore overlay reuses the interrupt slot — hide chips too.
+                    this.renderSuggestions();
                 },
             });
             if (resolved.startOpen) this.open = true;
@@ -303,6 +311,7 @@ export class SmoothAgentChatElement extends HTMLElement {
 
         // Remember starter prompts + greeting for the empty-state chips / async renders.
         this.examplePrompts = resolved.examplePrompts;
+        this.showSuggestedReplies = resolved.showSuggestedReplies;
         this.greeting = resolved.greeting;
 
         // Gate the conversation behind a pre-chat identity form when required.
@@ -348,6 +357,7 @@ export class SmoothAgentChatElement extends HTMLElement {
         const footerHtml = footerInner ? `<div class="footer">${footerInner}</div>` : '';
         const chatHtml = `
                 <div class="messages"></div>
+                <div class="reply-suggestions"></div>
                 <div class="interrupt hidden"></div>
                 <div class="composer-wrap">
                     <div class="composer">
@@ -385,6 +395,7 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.inputEl = container.querySelector('textarea');
         this.sendBtn = container.querySelector('.send');
         this.interruptEl = container.querySelector('.interrupt');
+        this.suggestionsEl = container.querySelector('.reply-suggestions');
 
         this.launcherEl?.addEventListener('click', () => this.openChat());
         container.querySelector('.close')?.addEventListener('click', () => this.closeChat());
@@ -936,6 +947,39 @@ export class SmoothAgentChatElement extends HTMLElement {
             }
         }
         this.scrollToBottom(true);
+        this.renderSuggestions();
+    }
+
+    /**
+     * Render (or clear) the mid-conversation suggested-reply chips under the
+     * composer. Shown ONLY when: the feature is enabled, no interrupt / restore
+     * overlay is active (those reuse the slot above the composer), and the LATEST
+     * message is a finalized assistant turn that carried suggestions. A new turn
+     * (agent or the visitor typing) appends messages, so the latest is no longer
+     * that assistant message and the chips clear on the next render. Chips reuse
+     * the empty-state `.prompts`/`.chip` styling and send via the same path.
+     */
+    private renderSuggestions(): void {
+        const el = this.suggestionsEl;
+        if (!el) return;
+        el.replaceChildren();
+        if (!this.showSuggestedReplies) return;
+        // Hidden while an OTP / tool-confirmation / restore overlay is active.
+        if (this.interrupt || this.identityRestore.phase !== 'idle') return;
+        const last = this.messages[this.messages.length - 1];
+        if (!last || last.role !== 'assistant' || last.streaming || !last.suggestions || last.suggestions.length === 0) return;
+
+        const chips = document.createElement('div');
+        chips.className = 'prompts';
+        for (const suggestion of last.suggestions) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'chip';
+            chip.textContent = suggestion;
+            chip.addEventListener('click', () => this.submitPrompt(suggestion));
+            chips.appendChild(chip);
+        }
+        el.appendChild(chips);
     }
 
     // ─────────────────────── Smooth streaming reveal ───────────────────────────
