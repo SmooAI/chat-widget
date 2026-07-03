@@ -106,6 +106,12 @@ export interface ChatWidgetConfig {
      * Clicking one sends it. Capped at 5 for layout.
      */
     examplePrompts?: string[];
+    /**
+     * Show mid-conversation suggested-reply chips ("quick replies") under the
+     * latest assistant message when the agent returns follow-up suggestions.
+     * Clicking one sends it. Defaults to `true` (shown unless explicitly `false`).
+     */
+    showSuggestedReplies?: boolean;
     /** Require the visitor's name before chatting. */
     requireName?: boolean;
     /** Require the visitor's email before chatting. */
@@ -180,6 +186,7 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         startOpen: config.startOpen ?? false,
         hideBranding: config.hideBranding ?? false,
         examplePrompts: (config.examplePrompts ?? []).filter((p) => p.trim().length > 0).slice(0, 5),
+        showSuggestedReplies: config.showSuggestedReplies ?? true,
         requireName: config.requireName ?? false,
         requireEmail: config.requireEmail ?? false,
         requirePhone: config.requirePhone ?? false,

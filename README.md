@@ -186,6 +186,9 @@ mountChatWidget({
 ```
 
 - **`examplePrompts`** render as clickable chips in the empty state (max 5).
+- **`showSuggestedReplies`** (default `true`) shows mid-conversation suggested-reply
+  chips under the latest assistant message when the agent returns follow-up
+  suggestions; tapping one sends it. Set `false` to hide them.
 - **`requireName` / `requireEmail` / `requirePhone`** show a styled pre-chat form;
   the collected name/email are attached to the conversation session (phone rides
   session metadata). Set **`allowAnonymous: true`** to skip the form.

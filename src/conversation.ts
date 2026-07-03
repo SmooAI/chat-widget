@@ -75,6 +75,13 @@ export interface ChatMessage {
      * defensively off the terminal event — see {@link extractCitations}.
      */
     citations?: Citation[];
+    /**
+     * Suggested follow-up replies ("quick replies") the agent offered on the
+     * terminal `eventual_response`. Set ONLY on the finalized assistant message —
+     * never mid-stream. Read defensively (see {@link extractSuggestions}); capped
+     * at 4 for layout. Absent when the turn offered none.
+     */
+    suggestions?: string[];
 }
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'ready' | 'error' | 'closed';
@@ -181,6 +188,20 @@ function extractCitations(inner: unknown): Citation[] {
         out.push({ id, title, snippet, score, url });
     }
     return out;
+}
+
+/**
+ * Pull the suggested follow-up replies out of a terminal `eventual_response`'s
+ * `response` object (`response.suggestedNextActions`). Optional + back-compatible
+ * like citations — read defensively (tolerating absence, non-array shapes, and
+ * non-string / blank entries) and capped at 4 so a chatty agent can't overflow
+ * the composer chip row.
+ */
+function extractSuggestions(response: unknown): string[] {
+    if (!response || typeof response !== 'object') return [];
+    const raw = (response as { suggestedNextActions?: unknown }).suggestedNextActions;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((s): s is string => typeof s === 'string' && s.trim().length > 0).slice(0, 4);
 }
 
 /** A `get_conversation_messages` row, narrowed defensively off the wire. */
@@ -622,6 +643,11 @@ export class ConversationController {
             const citations = extractCitations(inner);
             if (citations.length > 0) {
                 assistant.citations = citations;
+            }
+            // Suggested follow-up replies from the terminal event, when present.
+            const suggestions = extractSuggestions(inner?.response);
+            if (suggestions.length > 0) {
+                assistant.suggestions = suggestions;
             }
             assistant.streaming = false;
             this.emitMessages();

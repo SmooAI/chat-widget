@@ -281,6 +281,97 @@ describe('<smooth-agent-chat> render', () => {
     });
 });
 
+describe('mid-conversation suggested-reply chips', () => {
+    afterEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    interface Msg {
+        id: string;
+        role: 'user' | 'assistant';
+        text: string;
+        streaming: boolean;
+        suggestions?: string[];
+    }
+    interface Internals {
+        messages: Msg[];
+        interrupt: unknown;
+        controller: { send: (t: string) => void; disconnect: () => void } | null;
+        renderMessages(): void;
+        renderSuggestions(): void;
+    }
+
+    // Anonymous mount → no pre-chat gate, so the composer + suggestions slot exist.
+    function mountAnon(cfg: Record<string, unknown> = {}): { el: HTMLElement; sr: ShadowRoot; api: Internals } {
+        defineChatWidget();
+        const el = document.createElement(ELEMENT_TAG) as HTMLElement & { configure: (c: Record<string, unknown>) => void };
+        el.setAttribute('endpoint', 'wss://e/ws');
+        el.setAttribute('agent-id', 'a1');
+        el.configure({ allowAnonymous: true, ...cfg });
+        document.body.appendChild(el);
+        return { el, sr: el.shadowRoot!, api: el as unknown as Internals };
+    }
+
+    const finalized = (id: string, text: string, suggestions?: string[]): Msg => ({ id, role: 'assistant', text, streaming: false, suggestions });
+    const user = (id: string, text: string): Msg => ({ id, role: 'user', text, streaming: false });
+
+    it('renders chips for the latest assistant message with suggestions', () => {
+        const { sr, api } = mountAnon();
+        api.messages = [user('u1', 'hi'), finalized('a1', 'Hello!', ['Book a demo', 'See pricing'])];
+        api.renderMessages();
+        const chips = sr.querySelectorAll('.reply-suggestions .chip');
+        expect(chips.length).toBe(2);
+        expect(chips[0]?.textContent).toBe('Book a demo');
+        expect(chips[1]?.textContent).toBe('See pricing');
+    });
+
+    it('only shows suggestions for the LATEST message (not an earlier assistant turn)', () => {
+        const { sr, api } = mountAnon();
+        // Assistant turn with suggestions is followed by a newer user message.
+        api.messages = [finalized('a1', 'Hello!', ['Book a demo']), user('u2', 'thanks')];
+        api.renderMessages();
+        expect(sr.querySelectorAll('.reply-suggestions .chip').length).toBe(0);
+    });
+
+    it('does not show suggestions while the latest assistant message is still streaming', () => {
+        const { sr, api } = mountAnon();
+        api.messages = [user('u1', 'hi'), { id: 'a1', role: 'assistant', text: 'Hel', streaming: true, suggestions: ['x'] }];
+        api.renderMessages();
+        expect(sr.querySelectorAll('.reply-suggestions .chip').length).toBe(0);
+    });
+
+    it('tapping a chip sends its text and the chips clear on the next turn', () => {
+        const { sr, api } = mountAnon();
+        const sent: string[] = [];
+        api.controller = { send: (t: string) => sent.push(t), disconnect: () => {} };
+        api.messages = [user('u1', 'hi'), finalized('a1', 'Hello!', ['Book a demo'])];
+        api.renderMessages();
+        (sr.querySelector('.reply-suggestions .chip') as HTMLButtonElement).click();
+        expect(sent).toEqual(['Book a demo']);
+        // A new turn (streaming assistant appended) replaces them → chips clear.
+        api.messages = [...api.messages, user('u2', 'Book a demo'), { id: 'a2', role: 'assistant', text: '', streaming: true }];
+        api.renderSuggestions();
+        expect(sr.querySelectorAll('.reply-suggestions .chip').length).toBe(0);
+    });
+
+    it('hides chips while an interrupt overlay is active', () => {
+        const { sr, api } = mountAnon();
+        api.messages = [user('u1', 'hi'), finalized('a1', 'Hello!', ['Book a demo'])];
+        api.renderMessages();
+        expect(sr.querySelectorAll('.reply-suggestions .chip').length).toBe(1);
+        api.interrupt = { kind: 'confirm', actionDescription: 'Do the thing' };
+        api.renderSuggestions();
+        expect(sr.querySelectorAll('.reply-suggestions .chip').length).toBe(0);
+    });
+
+    it('renders no chips when showSuggestedReplies is false', () => {
+        const { sr, api } = mountAnon({ showSuggestedReplies: false });
+        api.messages = [user('u1', 'hi'), finalized('a1', 'Hello!', ['Book a demo'])];
+        api.renderMessages();
+        expect(sr.querySelectorAll('.reply-suggestions .chip').length).toBe(0);
+    });
+});
+
 describe('powered-by branding (link + hide-branding toggle)', () => {
     const REPO_URL = 'https://github.com/SmooAI/smooth-operator';
 

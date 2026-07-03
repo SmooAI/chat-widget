@@ -302,6 +302,66 @@ describe('ConversationController — same-session resume (ADR-048 §b)', () => {
     });
 });
 
+describe('ConversationController — suggested replies (from eventual_response)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /** Reply to send_message with a custom `response` object on the eventual_response. */
+    function withSendResponse(response: Record<string, unknown>): void {
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'send_message') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                reply({ type: 'stream_token', requestId, token: 'Hi' });
+                reply({ type: 'eventual_response', requestId, status: 200, data: { requestId, status: 200, data: { messageId: 'm1', response } } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+    }
+
+    it('attaches suggestedNextActions from the terminal event to the finalized assistant message', async () => {
+        withSendResponse({ responseParts: ['Sure'], suggestedNextActions: ['Book a demo', 'See pricing'] });
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+        const snap = onMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; streaming: boolean; suggestions?: string[] }>;
+        const assistant = snap.at(-1)!;
+        expect(assistant.role).toBe('assistant');
+        expect(assistant.streaming).toBe(false);
+        expect(assistant.suggestions).toEqual(['Book a demo', 'See pricing']);
+    });
+
+    it('caps suggestions at 4 and drops non-string / blank entries', async () => {
+        withSendResponse({
+            responseParts: ['Sure'],
+            suggestedNextActions: ['one', 2, '', '  ', 'two', null, 'three', 'four', 'five'],
+        });
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+        const snap = onMessages.mock.calls.at(-1)?.[0] as Array<{ suggestions?: string[] }>;
+        expect(snap.at(-1)?.suggestions).toEqual(['one', 'two', 'three', 'four']);
+    });
+
+    it('leaves suggestions undefined when the response carries none (or a non-array)', async () => {
+        withSendResponse({ responseParts: ['Sure'] });
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+        expect((onMessages.mock.calls.at(-1)?.[0] as Array<{ suggestions?: string[] }>).at(-1)?.suggestions).toBeUndefined();
+
+        withSendResponse({ responseParts: ['Sure'], suggestedNextActions: 'not-an-array' });
+        await controller.send('again');
+        expect((onMessages.mock.calls.at(-1)?.[0] as Array<{ suggestions?: string[] }>).at(-1)?.suggestions).toBeUndefined();
+    });
+});
+
 describe('httpBaseFromWsEndpoint', () => {
     it('derives the HTTP base from a wss /ws endpoint', () => {
         expect(httpBaseFromWsEndpoint('wss://ai.smoo.ai/ws')).toBe('https://ai.smoo.ai');
