@@ -643,6 +643,9 @@ ${
     border-color: color-mix(in srgb, var(--sac-primary) 60%, transparent);
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-primary) 14%, transparent);
 }
+.int-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.int-form .pc-field input { width: 100%; box-sizing: border-box; }
+.int-form .int-error { margin-top: 2px; }
 .int-btn {
     border: 1px solid color-mix(in srgb, var(--sac-border) 80%, transparent);
     background: var(--sac-surface-2);
@@ -662,8 +665,14 @@ ${
     color: var(--sac-primary-text);
     box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--sac-primary) 65%, transparent);
 }
-.int-row .int-btn { flex: 1; }
-.int-row .int-input + .int-btn { flex: 0 0 auto; }
+.int-row .int-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.int-form .pc-field input { width: 100%; box-sizing: border-box; }
+.int-form .int-error { margin-top: 2px; }
+.int-btn { flex: 1; }
+.int-row .int-input + .int-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.int-form .pc-field input { width: 100%; box-sizing: border-box; }
+.int-form .int-error { margin-top: 2px; }
+.int-btn { flex: 0 0 auto; }
 .int-error { margin-top: 8px; font-size: 12px; color: #f87171; }
 .int-card { position: relative; }
 .int-close {

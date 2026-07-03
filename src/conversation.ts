@@ -93,6 +93,9 @@ export type ConnectionStatus = 'idle' | 'connecting' | 'ready' | 'error' | 'clos
  *   Resume with {@link ConversationController.verifyOtp}.
  * - `confirm` — the agent wants to run a state-mutating tool and needs approval.
  *   Resume with {@link ConversationController.confirmTool}.
+ * - `interaction` — the agent raised a Rich Interaction (structured card, e.g.
+ *   identity intake). Resume with {@link ConversationController.submitInteraction}
+ *   or {@link ConversationController.declineInteraction}.
  */
 export type Interrupt =
     | {
@@ -106,7 +109,28 @@ export type Interrupt =
           error?: string;
           attemptsRemaining?: number;
       }
-    | { kind: 'confirm'; toolId?: string; actionDescription?: string };
+    | { kind: 'confirm'; toolId?: string; actionDescription?: string }
+    | {
+          kind: 'interaction';
+          /** Server-generated interaction instance id (echoed on submit). */
+          interactionId: string;
+          /** The Rich Interaction kind (e.g. `identity_intake`) — selects the card. */
+          interactionKind: string;
+          /** Kind-specific render spec (identity_intake: `{ fields: [...] }`). */
+          spec: Record<string, unknown>;
+          /** Why the agent raised it (card header copy). */
+          reason?: string;
+          /** Per-field server-side validation errors (from `interaction_invalid`). */
+          errors?: { field: string; message: string }[];
+      };
+
+/**
+ * The Rich-Interaction render capabilities this widget declares at session
+ * create (`supports`). Must stay aligned with the card registry in
+ * `element.ts` (`INTERACTION_CARDS`) — registering a card IS declaring its
+ * capability; a test asserts the two match.
+ */
+export const SUPPORTED_INTERACTION_CAPABILITIES: readonly string[] = ['identity_form'];
 
 export interface UserInfo {
     name?: string;
@@ -232,6 +256,9 @@ export class ConversationController {
     /** requestId of the in-flight turn — used to resume OTP / tool confirmations. */
     private activeRequestId: string | null = null;
     private interrupt: Interrupt | null = null;
+    /** Values from the last interaction submit, merged into the persisted
+     *  identity (identity_intake only) once the server acks them. */
+    private pendingInteractionValues: { kind: string; values: Record<string, unknown> } | null = null;
     private identityRestore: IdentityRestore = { phase: 'idle' };
     /**
      * True once the resume probe (persisted-pointer get_session OR the
@@ -334,6 +361,41 @@ export class ConversationController {
     confirmTool(approved: boolean): void {
         if (!this.client || !this.sessionId || !this.activeRequestId || this.interrupt?.kind !== 'confirm') return;
         this.client.confirmToolAction({ sessionId: this.sessionId, requestId: this.activeRequestId, approved });
+        this.setInterrupt(null);
+    }
+
+    /**
+     * Submit a Rich Interaction card to resume the parked turn. The server
+     * routes to the kind's validator: invalid values come back as an
+     * `interaction_invalid` event (the card re-renders with per-field errors —
+     * the turn stays parked); a valid submit is acked and the turn resumes.
+     * No-op if not awaiting an interaction.
+     */
+    submitInteraction(values: Record<string, unknown>): void {
+        if (!this.client || !this.sessionId || !this.activeRequestId || this.interrupt?.kind !== 'interaction') return;
+        // Stash the values so the ack (immediate_response) can merge accepted
+        // identity values into the persisted store.
+        this.pendingInteractionValues = { kind: this.interrupt.interactionKind, values };
+        this.client.submitInteraction({
+            sessionId: this.sessionId,
+            requestId: this.activeRequestId,
+            interactionId: this.interrupt.interactionId,
+            kind: this.interrupt.interactionKind,
+            values,
+        });
+    }
+
+    /** Decline the pending Rich Interaction; the agent continues without it. */
+    declineInteraction(): void {
+        if (!this.client || !this.sessionId || !this.activeRequestId || this.interrupt?.kind !== 'interaction') return;
+        this.client.submitInteraction({
+            sessionId: this.sessionId,
+            requestId: this.activeRequestId,
+            interactionId: this.interrupt.interactionId,
+            kind: this.interrupt.interactionKind,
+            declined: true,
+        });
+        this.pendingInteractionValues = null;
         this.setInterrupt(null);
     }
 
@@ -543,6 +605,10 @@ export class ConversationController {
             userName: state.identity.name,
             userEmail: state.identity.email,
             browserFingerprint: this.fingerprint(),
+            // Declare the Rich-Interaction cards this widget can render (derived
+            // from the card registry), so the server emits `interaction_required`
+            // for those kinds instead of the conversational fallback.
+            supports: [...SUPPORTED_INTERACTION_CAPABILITIES],
             ...(metadata ? { metadata } : {}),
         });
         this.sessionId = session.sessionId;
@@ -700,7 +766,51 @@ export class ConversationController {
             case 'write_confirmation_required':
                 this.setInterrupt({ kind: 'confirm', toolId: str(inner.toolId), actionDescription: str(inner.actionDescription) });
                 break;
-            default:
+            case 'interaction_required': {
+                const interactionId = str(inner.interactionId);
+                const kind = str(inner.kind);
+                const spec = inner.spec && typeof inner.spec === 'object' ? (inner.spec as Record<string, unknown>) : {};
+                if (!interactionId || !kind) break; // not renderable — ignore
+                this.pendingInteractionValues = null;
+                this.setInterrupt({
+                    kind: 'interaction',
+                    interactionId,
+                    interactionKind: kind,
+                    spec,
+                    reason: str(inner.reason),
+                });
+                break;
+            }
+            case 'interaction_invalid':
+                if (this.interrupt?.kind === 'interaction' && this.interrupt.interactionId === str(inner.interactionId)) {
+                    const errors: { field: string; message: string }[] = [];
+                    if (Array.isArray(inner.errors)) {
+                        for (const e of inner.errors) {
+                            if (!e || typeof e !== 'object') continue;
+                            const o = e as Record<string, unknown>;
+                            const field = str(o.field);
+                            if (field) errors.push({ field, message: str(o.message) ?? 'Invalid value' });
+                        }
+                    }
+                    this.pendingInteractionValues = null;
+                    this.setInterrupt({ ...this.interrupt, errors });
+                }
+                break;
+            case 'immediate_response':
+                // Mid-turn immediate_response while an interaction card is showing
+                // is the submit/decline ack: the park resolved — clear the card
+                // and, for accepted identity values, persist them.
+                if (this.interrupt?.kind === 'interaction') {
+                    const pending = this.pendingInteractionValues;
+                    if (pending && pending.kind === 'identity_intake') {
+                        const v = pending.values as { name?: string; email?: string; phone?: string };
+                        this.store.getState().mergeIdentity({ name: v.name, email: v.email, phone: v.phone });
+                    }
+                    this.pendingInteractionValues = null;
+                    this.setInterrupt(null);
+                }
+                break;
+                        default:
                 break;
         }
     }

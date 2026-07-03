@@ -10,8 +10,8 @@ importers:
   .:
     dependencies:
       '@smooai/smooth-operator':
-        specifier: ^1.8.0
-        version: 1.8.0
+        specifier: ^1.21.1
+        version: 1.21.1
       libphonenumber-js:
         specifier: ^1.13.7
         version: 1.13.7
@@ -575,8 +575,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@smooai/smooth-operator@1.8.0':
-    resolution: {integrity: sha512-Nlg8SQ9YDtqOg425sQhJQg++qsg6yURqqE/ZMsXwz8GXZpxSShaBEhTbE0e+cP2fE4CwHafy3CGdVsdNMb4R7Q==}
+  '@smooai/smooth-operator@1.21.1':
+    resolution: {integrity: sha512-lWz4uZt5lRPOuhFO9QwDKY4OPAWH8JjK6aefO8/yFiGSBju9UFwJxmkj9ypJ4AcGI97zNsutDEP0mfE8EgsP+A==}
     engines: {node: '>=22'}
     peerDependencies:
       react: '>=18'
@@ -1986,7 +1986,7 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.0':
     optional: true
 
-  '@smooai/smooth-operator@1.8.0':
+  '@smooai/smooth-operator@1.21.1':
     dependencies:
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
