@@ -1,5 +1,0 @@
----
-'@smooai/chat-widget': minor
----
-
-Rich Interactions card registry + the identity_intake card. The widget now speaks the smooth-operator Rich Interactions protocol: it declares its render capabilities (`supports: ['identity_form']`, derived from the card registry) at session create, renders `interaction_required` interrupts as overlay cards above the composer, and resumes the parked turn via the generic `submit_interaction` verb. The identity card reuses the pre-chat form's field pattern (same classes, libphonenumber as-you-type phone formatting, E.164 canonicalization) with per-field server-side validation errors (`interaction_invalid` re-renders the card — the turn stays parked), known-identity pre-fill, and a decline affordance; accepted values merge into the persisted visitor identity. Adding a future interaction kind (date picker, choice chips, …) = one card builder + one `INTERACTION_CARDS` entry. Requires a smooth-operator server hosting Rich Interactions (client `@smooai/smooth-operator` pinned ^1.21.1); older servers simply never emit interaction events.
