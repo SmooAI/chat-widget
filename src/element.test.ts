@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { defineChatWidget, ELEMENT_TAG, safeHttpUrl } from './element.js';
+import { defineChatWidget, ELEMENT_TAG, INTERACTION_CARDS, safeHttpUrl } from './element.js';
+import { type Interrupt, SUPPORTED_INTERACTION_CAPABILITIES } from './conversation.js';
 
 describe('safeHttpUrl', () => {
     it('accepts absolute http(s) URLs and returns the normalized href', () => {
@@ -468,3 +469,105 @@ describe('fullpage container sizing (composer-clip regression)', () => {
         expect(el.hasAttribute('data-viewport-fallback')).toBe(true);
     });
 });
+
+describe('Rich Interactions card registry', () => {
+    afterEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    it('registry capabilities and the declared supports list stay aligned', () => {
+        const registryCapabilities = Object.values(INTERACTION_CARDS)
+            .map((c) => c.capability)
+            .sort();
+        expect([...SUPPORTED_INTERACTION_CAPABILITIES].sort()).toEqual(registryCapabilities);
+    });
+
+    function mountWithInterrupt(interrupt: Extract<Interrupt, { kind: 'interaction' }>): {
+        sr: ShadowRoot;
+        calls: { submit: Record<string, unknown>[]; decline: number };
+    } {
+        defineChatWidget();
+        const el = document.createElement(ELEMENT_TAG);
+        el.setAttribute('endpoint', 'wss://e/ws');
+        el.setAttribute('agent-id', 'a1');
+        document.body.appendChild(el);
+        const calls: { submit: Record<string, unknown>[]; decline: number } = { submit: [], decline: 0 };
+        // Stub the controller seam (same pattern as the pre-chat phone tests).
+        const priv = el as unknown as { controller: unknown; interrupt: Interrupt | null; renderInterrupt: () => void };
+        priv.controller = {
+            submitInteraction: (v: Record<string, unknown>) => calls.submit.push(v),
+            declineInteraction: () => {
+                calls.decline += 1;
+            },
+            getStore: () => ({ getState: () => ({ identity: { email: 'known@example.com' } }) }),
+            connect: () => Promise.resolve(),
+            disconnect: () => {},
+        };
+        priv.interrupt = interrupt;
+        priv.renderInterrupt();
+        return { sr: el.shadowRoot!, calls };
+    }
+
+    const baseInterrupt = (over: Partial<Extract<Interrupt, { kind: 'interaction' }>> = {}): Extract<Interrupt, { kind: 'interaction' }> => ({
+        kind: 'interaction',
+        interactionId: 'int-1',
+        interactionKind: 'identity_intake',
+        spec: {
+            fields: [
+                { key: 'email', required: true, label: 'Work email' },
+                { key: 'phone', required: false },
+            ],
+        },
+        reason: 'to send you the quote',
+        ...over,
+    });
+
+    it('renders the identity card from the spec: fields, labels, reason, prefill', () => {
+        const { sr } = mountWithInterrupt(baseInterrupt());
+        const overlay = sr.querySelector('.interrupt')!;
+        expect(overlay.classList.contains('hidden')).toBe(false);
+        expect(sr.querySelector('.int-title')?.textContent).toBe('Share your details');
+        expect(sr.querySelector('.int-desc')?.textContent).toBe('to send you the quote');
+
+        const email = sr.querySelector('.int-form input[name="email"]') as HTMLInputElement;
+        expect(email).not.toBeNull();
+        expect(email.required).toBe(true);
+        expect(email.type).toBe('email');
+        // Known identity pre-fills the field.
+        expect(email.value).toBe('known@example.com');
+        // Custom label wins over the default.
+        expect(email.closest('.pc-field')?.querySelector('span')?.textContent).toBe('Work email');
+
+        const phone = sr.querySelector('.int-form input[name="phone"]') as HTMLInputElement;
+        expect(phone.required).toBe(false);
+        expect(phone.type).toBe('tel');
+        // Only requested fields render.
+        expect(sr.querySelector('.int-form input[name="name"]')).toBeNull();
+    });
+
+    it('renders per-field server errors from interaction_invalid', () => {
+        const { sr } = mountWithInterrupt(baseInterrupt({ errors: [{ field: 'email', message: 'must be a valid email address' }] }));
+        const field = sr.querySelector('.int-form input[name="email"]')?.closest('.pc-field') as HTMLElement;
+        expect(field.classList.contains('invalid')).toBe(true);
+        expect(field.querySelector('.int-error')?.textContent).toBe('must be a valid email address');
+    });
+
+    it('submits collected values (phone canonicalized to E.164) and supports decline', () => {
+        const { sr, calls } = mountWithInterrupt(baseInterrupt());
+        const form = sr.querySelector('.int-form') as HTMLFormElement;
+        (form.querySelector('input[name="email"]') as HTMLInputElement).value = 'ada@example.com';
+        (form.querySelector('input[name="phone"]') as HTMLInputElement).value = '(213) 373-4253';
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        expect(calls.submit).toEqual([{ email: 'ada@example.com', phone: '+12133734253', name: undefined }]);
+
+        (sr.querySelector('.int-form .int-btn:not(.primary)') as HTMLButtonElement).click();
+        expect(calls.decline).toBe(1);
+    });
+
+    it('auto-declines a kind with no registered card so the turn never hangs', () => {
+        const { sr, calls } = mountWithInterrupt(baseInterrupt({ interactionKind: 'date_picker', spec: {} }));
+        expect(calls.decline).toBe(1);
+        expect(sr.querySelector('.interrupt')?.classList.contains('hidden')).toBe(true);
+    });
+});
+

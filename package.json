@@ -70,7 +70,7 @@
         "ci:publish": "pnpm build && changeset publish"
     },
     "dependencies": {
-        "@smooai/smooth-operator": "^1.8.0",
+        "@smooai/smooth-operator": "^1.21.1",
         "libphonenumber-js": "^1.13.7",
         "zustand": "^5.0.14"
     },

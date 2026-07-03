@@ -687,3 +687,151 @@ describe('ConversationController — adversarial-review hardening (SMOODEV-2129e
         expect(probesAfterSecond, 'resume probe must run at most once').toBe(1);
     });
 });
+
+describe('ConversationController — Rich Interactions (identity_intake card)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    it('declares the card registry capabilities at session create', async () => {
+        const { controller } = makeController();
+        await controller.connect();
+        const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
+        expect(create.supports).toEqual(['identity_form']);
+    });
+
+    it('parks on interaction_required, re-renders on invalid, resumes + persists identity on the ack', async () => {
+        const interrupts: unknown[] = [];
+        // Scripted operator: the turn raises the interaction; the first submit is
+        // invalid (server-side validation), the second is acked and resumes.
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'create_conversation_session') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: { sessionId: 'sess-1', conversationId: 'conv-1', agentId: frame.agentId } });
+            } else if (frame.action === 'send_message') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                reply({
+                    type: 'interaction_required',
+                    requestId,
+                    data: {
+                        requestId,
+                        data: {
+                            interactionId: 'int-1',
+                            kind: 'identity_intake',
+                            spec: {
+                                fields: [
+                                    { key: 'email', required: true, label: 'Work email' },
+                                    { key: 'name', required: false },
+                                ],
+                            },
+                            reason: 'to send you the quote',
+                        },
+                    },
+                });
+            } else if (frame.action === 'submit_interaction') {
+                const values = frame.values as Record<string, unknown> | undefined;
+                if (values?.email === 'nope') {
+                    reply({
+                        type: 'interaction_invalid',
+                        requestId,
+                        data: {
+                            requestId,
+                            data: {
+                                interactionId: 'int-1',
+                                kind: 'identity_intake',
+                                errors: [{ field: 'email', message: 'must be a valid email address' }],
+                                message: 'Some fields need attention.',
+                            },
+                        },
+                    });
+                } else {
+                    // Valid: ack, then the parked turn resumes and completes.
+                    reply({ type: 'immediate_response', requestId, status: 200, message: 'Interaction submitted', data: {} });
+                    reply({ type: 'stream_token', requestId, token: 'Thanks!' });
+                    reply({ type: 'eventual_response', requestId, status: 200, data: { requestId, status: 200, data: { messageId: 'm1', response: { responseParts: ['Thanks!'] } } } });
+                }
+            }
+        };
+
+        const { controller, store } = makeController({ onInterrupt: (i) => interrupts.push(i) });
+        await controller.connect();
+        const sent = controller.send('I want a quote');
+        await tick();
+
+        // 1. The card interrupt surfaced with the kind + spec + reason.
+        const first = interrupts.at(-1) as { kind: string; interactionId: string; interactionKind: string; spec: Record<string, unknown>; reason?: string };
+        expect(first?.kind).toBe('interaction');
+        expect(first?.interactionId).toBe('int-1');
+        expect(first?.interactionKind).toBe('identity_intake');
+        expect(first?.reason).toBe('to send you the quote');
+        expect(first?.spec.fields).toEqual([
+            { key: 'email', required: true, label: 'Work email' },
+            { key: 'name', required: false },
+        ]);
+
+        // 2. An invalid submit re-renders the SAME interrupt with per-field errors.
+        controller.submitInteraction({ email: 'nope' });
+        await tick();
+        const submitted = MockSocket.sentFrames.find((f) => f.action === 'submit_interaction') as Record<string, unknown>;
+        expect(submitted.interactionId).toBe('int-1');
+        expect(submitted.kind).toBe('identity_intake');
+        const invalid = interrupts.at(-1) as { kind: string; errors?: { field: string; message: string }[] };
+        expect(invalid?.kind).toBe('interaction');
+        expect(invalid?.errors).toEqual([{ field: 'email', message: 'must be a valid email address' }]);
+        // Rejected values are NOT persisted.
+        expect(store.getState().identity.email).toBeUndefined();
+
+        // 3. A valid submit clears the interrupt, persists the accepted identity,
+        //    and the turn resumes to completion.
+        controller.submitInteraction({ email: 'ada@example.com', name: 'Ada' });
+        await tick();
+        await sent;
+        expect(interrupts.at(-1)).toBeNull();
+        expect(store.getState().identity.email).toBe('ada@example.com');
+        expect(store.getState().identity.name).toBe('Ada');
+    });
+
+    it('decline sends declined: true and clears the interrupt without persisting anything', async () => {
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'create_conversation_session') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: { sessionId: 'sess-1', conversationId: 'conv-1', agentId: frame.agentId } });
+            } else if (frame.action === 'send_message') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                reply({
+                    type: 'interaction_required',
+                    requestId,
+                    data: {
+                        requestId,
+                        data: { interactionId: 'int-2', kind: 'identity_intake', spec: { fields: [{ key: 'email', required: true }] }, reason: 'to follow up' },
+                    },
+                });
+            } else if (frame.action === 'submit_interaction') {
+                reply({ type: 'immediate_response', requestId, status: 200, message: 'Interaction declined', data: {} });
+                reply({ type: 'eventual_response', requestId, status: 200, data: { requestId, status: 200, data: { messageId: 'm1', response: { responseParts: ['No problem.'] } } } });
+            }
+        };
+
+        const interrupts: unknown[] = [];
+        const { controller, store } = makeController({ onInterrupt: (i) => interrupts.push(i) });
+        await controller.connect();
+        const sent = controller.send('quote please');
+        await tick();
+        expect((interrupts.at(-1) as { kind?: string })?.kind).toBe('interaction');
+
+        controller.declineInteraction();
+        await tick();
+        await sent;
+        const decline = MockSocket.sentFrames.find((f) => f.action === 'submit_interaction') as Record<string, unknown>;
+        expect(decline.declined).toBe(true);
+        expect(decline.interactionId).toBe('int-2');
+        expect(decline.values).toBeUndefined();
+        expect(interrupts.at(-1)).toBeNull();
+        expect(store.getState().identity.email).toBeUndefined();
+    });
+});
+

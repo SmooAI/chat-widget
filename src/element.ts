@@ -17,7 +17,7 @@
 import { AsYouType, isValidPhoneNumber, parsePhoneNumber } from 'libphonenumber-js/min';
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { needsUserInfo, resolveConfig } from './config.js';
-import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type IdentityRestore, type Interrupt } from './conversation.js';
+import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type IdentityRestore, type Interrupt, SUPPORTED_INTERACTION_CAPABILITIES } from './conversation.js';
 import { SMOOTH_ICON_SVG } from './logo.js';
 import { cleanCitationSnippet, escapeHtml, renderMarkdown, safeHttpUrl } from './markdown.js';
 import { buildStyles } from './styles.js';
@@ -71,9 +71,165 @@ const ICON = {
     chev: `<svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
     /** OTP interrupt — a padlock. */
     lock: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="10.5" width="14" height="9.5" rx="2.2" stroke="currentColor" stroke-width="1.7"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" stroke="currentColor" stroke-width="1.7"/></svg>`,
+    /** Identity-intake interrupt — a person. */
+    user: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="8.2" r="3.4" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 19.5c.8-3.1 3.4-4.8 6.5-4.8s5.7 1.7 6.5 4.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
     /** Tool-confirmation interrupt — a shield. */
     shield: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3 5 6v5c0 4.4 3 7.2 7 8.5 4-1.3 7-4.1 7-8.5V6l-7-3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m9 11.5 2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 } as const;
+
+/**
+ * The Rich Interactions **card registry**: interaction kind → overlay card.
+ * `interaction_required { kind }` looks its card up here; registering a card IS
+ * declaring the widget's render capability for that kind (see
+ * `SUPPORTED_INTERACTION_CAPABILITIES` in conversation.ts — a test keeps the
+ * two aligned). Adding a kind = one card builder + one entry.
+ *
+ * The existing OTP and tool-approval overlays are prior instances of this same
+ * shape and should retrofit onto this registry later (their wire events predate
+ * the pattern).
+ */
+export interface InteractionCardContext {
+    /** Submit kind-shaped values (resumes the parked turn; server validates). */
+    submit: (values: Record<string, unknown>) => void;
+    /** Decline the interaction (the agent continues without it). */
+    decline: () => void;
+    /** Persisted visitor identity, for pre-filling known fields. */
+    prefill: { name?: string; email?: string; phone?: string };
+    /** Wire live phone formatting + validity hint onto a form's phone input. */
+    wirePhoneField: (form: HTMLFormElement) => void;
+}
+
+export interface InteractionCard {
+    /** The render capability this card provides (goes into `supports`). */
+    capability: string;
+    /** Card header title. */
+    title: string;
+    /** Static, trusted header icon SVG. */
+    icon: string;
+    /** Build the card body for an `interaction` interrupt. */
+    build: (it: Extract<Interrupt, { kind: 'interaction' }>, ctx: InteractionCardContext) => HTMLElement;
+}
+
+/**
+ * The identity_intake card: the fields the agent requested (pre-chat form field
+ * pattern — same classes, same phone formatting), per-field server errors, a
+ * submit and a decline affordance. Server-supplied text (reason, labels, error
+ * messages) is set via `textContent` — never innerHTML.
+ */
+function buildIdentityIntakeCard(it: Extract<Interrupt, { kind: 'interaction' }>, ctx: InteractionCardContext): HTMLElement {
+    const form = document.createElement('form');
+    form.className = 'int-form';
+    form.noValidate = true;
+
+    if (it.reason) {
+        const desc = document.createElement('div');
+        desc.className = 'int-desc';
+        desc.textContent = it.reason;
+        form.appendChild(desc);
+    }
+
+    const DEFAULTS: Record<string, { label: string; type: string; autocomplete: string }> = {
+        name: { label: 'Name', type: 'text', autocomplete: 'name' },
+        email: { label: 'Email', type: 'email', autocomplete: 'email' },
+        phone: { label: 'Phone', type: 'tel', autocomplete: 'tel' },
+    };
+
+    // Parse the kind's spec defensively: `{ fields: [{ key, required, label? }] }`.
+    const rawFields = Array.isArray(it.spec.fields) ? it.spec.fields : [];
+    const fields: { key: 'name' | 'email' | 'phone'; required: boolean; label?: string }[] = [];
+    for (const f of rawFields) {
+        if (!f || typeof f !== 'object') continue;
+        const o = f as Record<string, unknown>;
+        const key = typeof o.key === 'string' ? o.key : '';
+        if (key !== 'name' && key !== 'email' && key !== 'phone') continue;
+        fields.push({ key, required: o.required === true, label: typeof o.label === 'string' ? o.label : undefined });
+    }
+    if (fields.length === 0) fields.push({ key: 'email', required: true });
+
+    for (const f of fields) {
+        const d = DEFAULTS[f.key]!;
+        const label = document.createElement('label');
+        label.className = 'pc-field';
+        const caption = document.createElement('span');
+        caption.textContent = f.label ?? d.label;
+        const input = document.createElement('input');
+        input.name = f.key;
+        input.type = d.type;
+        input.setAttribute('autocomplete', d.autocomplete);
+        input.required = f.required;
+        const prefill = ctx.prefill[f.key];
+        if (prefill) input.value = prefill;
+        label.append(caption, input);
+        if (f.key === 'phone') {
+            const hint = document.createElement('span');
+            hint.className = 'pc-hint';
+            hint.setAttribute('aria-live', 'polite');
+            label.appendChild(hint);
+        }
+        // Per-field server-side validation error (interaction_invalid).
+        const serverError = it.errors?.find((e) => e.field === f.key);
+        if (serverError) {
+            label.classList.add('invalid');
+            const err = document.createElement('span');
+            err.className = 'int-error';
+            err.textContent = serverError.message;
+            label.appendChild(err);
+        }
+        form.appendChild(label);
+    }
+
+    const row = document.createElement('div');
+    row.className = 'int-row';
+    const decline = document.createElement('button');
+    decline.className = 'int-btn';
+    decline.type = 'button';
+    decline.textContent = 'No thanks';
+    decline.addEventListener('click', () => ctx.decline());
+    const share = document.createElement('button');
+    share.className = 'int-btn primary';
+    share.type = 'submit';
+    share.textContent = 'Share details';
+    row.append(decline, share);
+    form.appendChild(row);
+
+    form.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        if (!form.reportValidity()) return;
+        const data = new FormData(form);
+        const val = (k: string) => ((data.get(k) as string | null)?.trim() || undefined);
+
+        // Phone: mirror the pre-chat rules — block a required-but-invalid number,
+        // prefer canonical E.164 when it parses (the server re-validates anyway).
+        const rawPhone = val('phone');
+        const phoneInput = form.querySelector('input[name="phone"]') as HTMLInputElement | null;
+        if (rawPhone && phoneInput && !isValidPhoneNumber(rawPhone, PHONE_DEFAULT_REGION)) {
+            const field = phoneInput.closest('.pc-field');
+            field?.classList.add('invalid');
+            const hint = field?.querySelector('.pc-hint');
+            if (hint) hint.textContent = 'Enter a valid phone number';
+            if (phoneInput.hasAttribute('required')) {
+                phoneInput.focus();
+                return;
+            }
+        }
+        const phone = rawPhone ? (phoneToE164(rawPhone) ?? rawPhone) : undefined;
+        ctx.submit({ name: val('name'), email: val('email'), phone });
+    });
+    // Same live phone formatting + validity hint as the pre-chat form.
+    ctx.wirePhoneField(form);
+    queueMicrotask(() => (form.querySelector('input') as HTMLInputElement | null)?.focus());
+    return form;
+}
+
+/** Kind → card. See the registry doc above. */
+export const INTERACTION_CARDS: Record<string, InteractionCard> = {
+    identity_intake: {
+        capability: 'identity_form',
+        title: 'Share your details',
+        icon: ICON.user,
+        build: buildIdentityIntakeCard,
+    },
+};
 
 // `safeHttpUrl` / `escapeHtml` live in `./markdown.js` (the markdown renderer
 // needs them too); re-exported here for back-compat with existing importers.
@@ -480,21 +636,38 @@ export class SmoothAgentChatElement extends HTMLElement {
         head.className = 'int-head';
         const ico = document.createElement('span');
         ico.className = 'int-ico';
-        ico.innerHTML = it.kind === 'otp' ? ICON.lock : ICON.shield; // static, trusted
+        const card_meta = it.kind === 'interaction' ? INTERACTION_CARDS[it.interactionKind] : undefined;
+        if (it.kind === 'interaction' && !card_meta) {
+            // A kind we have no card for (shouldn't happen — we only declare
+            // capabilities for registered cards). Decline so the turn never hangs.
+            this.controller?.declineInteraction();
+            el.classList.add('hidden');
+            return;
+        }
+        ico.innerHTML = it.kind === 'otp' ? ICON.lock : it.kind === 'interaction' ? (card_meta?.icon ?? ICON.user) : ICON.shield; // static, trusted
         const title = document.createElement('span');
         title.className = 'int-title';
-        title.textContent = it.kind === 'otp' ? 'Verification required' : 'Confirm this action';
+        title.textContent = it.kind === 'otp' ? 'Verification required' : it.kind === 'interaction' ? (card_meta?.title ?? 'One more thing') : 'Confirm this action';
         head.append(ico, title);
         card.appendChild(head);
 
-        if (it.actionDescription) {
+        if (it.kind !== 'interaction' && it.actionDescription) {
             const desc = document.createElement('div');
             desc.className = 'int-desc';
             desc.textContent = it.actionDescription;
             card.appendChild(desc);
         }
 
-        if (it.kind === 'otp') {
+        if (it.kind === 'interaction') {
+            card.appendChild(
+                card_meta!.build(it, {
+                    submit: (values) => this.controller?.submitInteraction(values),
+                    decline: () => this.controller?.declineInteraction(),
+                    prefill: this.controller?.getStore().getState().identity ?? {},
+                    wirePhoneField: (form) => this.wirePhoneField(form),
+                }),
+            );
+        } else if (it.kind === 'otp') {
             if (it.sent?.maskedDestination) {
                 const sent = document.createElement('div');
                 sent.className = 'int-sent';
