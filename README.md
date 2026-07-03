@@ -228,6 +228,7 @@ Declarative attributes mirror the programmatic [`ChatWidgetConfig`](./src/config
 | `greeting`      | `greeting`       | Shown before the first message.                    |
 | `mode`          | `mode`           | `popover` (default) or `fullpage`.                 |
 | `start-open`    | `startOpen`      | Open the panel immediately (no launcher click).    |
+| `hide-branding` | `hideBranding`   | Hide the "powered by smooth-operator" tag + footer link. Default shown. |
 | —               | `theme`          | Brand colors (see [Theming](#theming)).            |
 | —               | `userName` / `userEmail` | Optional participant identity.             |
 

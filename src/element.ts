@@ -49,7 +49,10 @@ function phoneToE164(value: string): string | null {
     }
 }
 
-const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'logo-url', 'placeholder', 'greeting', 'start-open', 'mode'] as const;
+/** Public smooth-operator repo — the "powered by" header tag + footer link here. */
+const SMOOTH_OPERATOR_URL = 'https://github.com/SmooAI/smooth-operator';
+
+const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'logo-url', 'placeholder', 'greeting', 'start-open', 'mode', 'hide-branding'] as const;
 
 /**
  * Inline SVG icons (static, trusted strings — never interpolated with user data).
@@ -204,6 +207,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             greeting: this.overrides.greeting ?? this.getAttribute('greeting') ?? undefined,
             connectionErrorMessage: this.overrides.connectionErrorMessage,
             startOpen: this.overrides.startOpen ?? this.hasAttribute('start-open'),
+            hideBranding: this.overrides.hideBranding ?? this.hasAttribute('hide-branding'),
             examplePrompts: this.overrides.examplePrompts,
             requireName: this.overrides.requireName,
             requireEmail: this.overrides.requireEmail,
@@ -282,7 +286,11 @@ export class SmoothAgentChatElement extends HTMLElement {
                         <span class="title">${escapeHtml(resolved.agentName)}</span>
                         <span class="status"><span class="dot off"></span><span class="status-text"></span></span>
                     </div>
-                    <span class="powered">powered by smooth-operator</span>
+                    ${
+                        resolved.hideBranding
+                            ? ''
+                            : `<a class="powered" href="${SMOOTH_OPERATOR_URL}" target="_blank" rel="noopener noreferrer">powered by smooth-operator</a>`
+                    }
                 </div>`
             : `<div class="header">
                     <div class="avatar">${monogram}</div>
@@ -329,7 +337,15 @@ export class SmoothAgentChatElement extends HTMLElement {
                     <button type="submit" class="pc-submit">Start chat</button>
                 </form>
             </div>`;
-        const restoreLink = this.allowChatRestore ? ` · <button type="button" class="restore-link">Restore my chats</button>` : '';
+        // Footer: optional "powered by" branding (hidden by hide-branding) and an
+        // optional "Restore my chats" affordance. The " · " separator only appears
+        // when both are present, and the footer is omitted entirely when neither is.
+        const brandingHtml = resolved.hideBranding
+            ? ''
+            : `<a href="${SMOOTH_OPERATOR_URL}" target="_blank" rel="noopener noreferrer">powered by <b>smooth&#8209;operator</b></a>`;
+        const restoreBtn = this.allowChatRestore ? `<button type="button" class="restore-link">Restore my chats</button>` : '';
+        const footerInner = [brandingHtml, restoreBtn].filter(Boolean).join(' · ');
+        const footerHtml = footerInner ? `<div class="footer">${footerInner}</div>` : '';
         const chatHtml = `
                 <div class="messages"></div>
                 <div class="interrupt hidden"></div>
@@ -338,7 +354,7 @@ export class SmoothAgentChatElement extends HTMLElement {
                         <textarea rows="1" placeholder="${escapeHtml(resolved.placeholder)}"></textarea>
                         <button class="send" type="button" aria-label="Send message">${ICON.send}</button>
                     </div>
-                    <div class="footer">powered by <b>smooth&#8209;operator</b>${restoreLink}</div>
+                    ${footerHtml}
                 </div>`;
 
         const container = document.createElement('div');
