@@ -281,6 +281,69 @@ describe('<smooth-agent-chat> render', () => {
     });
 });
 
+describe('powered-by branding (link + hide-branding toggle)', () => {
+    const REPO_URL = 'https://github.com/SmooAI/smooth-operator';
+
+    afterEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    function mount(attrs: Record<string, string>): HTMLElement {
+        defineChatWidget();
+        const el = document.createElement(ELEMENT_TAG);
+        el.setAttribute('endpoint', 'wss://e/ws');
+        el.setAttribute('agent-id', 'a1');
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+        document.body.appendChild(el);
+        return el;
+    }
+    function mountCfg(cfg: Record<string, unknown>): HTMLElement {
+        defineChatWidget();
+        const el = document.createElement(ELEMENT_TAG) as HTMLElement & { configure: (c: Record<string, unknown>) => void };
+        el.setAttribute('endpoint', 'wss://e/ws');
+        el.setAttribute('agent-id', 'a1');
+        el.configure(cfg);
+        document.body.appendChild(el);
+        return el;
+    }
+
+    it('by default links the composer footer to the smooth-operator repo (new tab)', () => {
+        const link = mount({}).shadowRoot!.querySelector('.footer a') as HTMLAnchorElement | null;
+        expect(link).not.toBeNull();
+        expect(link?.getAttribute('href')).toBe(REPO_URL);
+        expect(link?.getAttribute('target')).toBe('_blank');
+        expect(link?.getAttribute('rel')).toContain('noopener');
+        expect(link?.textContent).toContain('smooth');
+    });
+
+    it('by default shows a linked "powered by" tag in the full-page header', () => {
+        const tag = mount({ mode: 'fullpage' }).shadowRoot!.querySelector('.powered') as HTMLAnchorElement | null;
+        expect(tag).not.toBeNull();
+        expect(tag?.tagName).toBe('A');
+        expect(tag?.getAttribute('href')).toBe(REPO_URL);
+        expect(tag?.getAttribute('target')).toBe('_blank');
+    });
+
+    it('hide-branding attribute drops the header tag and the footer branding link (full-page)', () => {
+        const sr = mount({ mode: 'fullpage', 'hide-branding': '' }).shadowRoot!;
+        expect(sr.querySelector('.powered')).toBeNull();
+        // No link to the repo anywhere in the footer.
+        expect(sr.querySelector('.footer a')).toBeNull();
+    });
+
+    it('hideBranding via configure() hides branding but keeps the "Restore my chats" affordance', () => {
+        const sr = mountCfg({ hideBranding: true }).shadowRoot!;
+        expect(sr.querySelector('.footer a')).toBeNull();
+        expect(sr.querySelector('.restore-link')).not.toBeNull();
+    });
+
+    it('hide-branding with restore disabled omits the footer entirely (popover)', () => {
+        const sr = mountCfg({ hideBranding: true, allowChatRestore: false }).shadowRoot!;
+        expect(sr.querySelector('.powered')).toBeNull();
+        expect(sr.querySelector('.footer')).toBeNull();
+    });
+});
+
 describe('fullpage container sizing (composer-clip regression)', () => {
     afterEach(() => {
         document.body.innerHTML = '';

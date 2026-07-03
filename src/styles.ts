@@ -239,7 +239,8 @@ ${
 }
 .close:hover { background: color-mix(in srgb, var(--sac-text) 12%, transparent); transform: translateY(1px); }
 .close svg { width: 16px; height: 16px; opacity: .8; }
-.powered { margin-left: auto; font-size: 10.5px; letter-spacing: .02em; opacity: .6; }
+.powered { margin-left: auto; font-size: 10.5px; letter-spacing: .02em; opacity: .6; color: inherit; text-decoration: none; }
+.powered:hover { opacity: .85; text-decoration: underline; }
 .header-sep { height: 1px; margin: 0 16px; background: linear-gradient(90deg, transparent, var(--sac-border), transparent); }
 
 /* Full-page header: taller, logo-led, no close. */
@@ -511,6 +512,8 @@ ${
     color: color-mix(in srgb, var(--sac-text) 38%, transparent);
 }
 .footer b { font-weight: 600; color: color-mix(in srgb, var(--sac-text) 55%, transparent); }
+.footer a { color: inherit; text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
 
 /* ─────────────────── Pre-chat identity form ───────────────────────── */
 .prechat { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 18px; padding: 22px 20px; }

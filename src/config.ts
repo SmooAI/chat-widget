@@ -96,6 +96,12 @@ export interface ChatWidgetConfig {
     /** Start the panel open instead of collapsed to the launcher. */
     startOpen?: boolean;
     /**
+     * Hide the "powered by smooth-operator" branding in the header tag and the
+     * composer footer. Defaults to `false` (branding shown). The `hide-branding`
+     * HTML attribute maps to this.
+     */
+    hideBranding?: boolean;
+    /**
      * Suggested starter prompts shown as clickable chips before the first message.
      * Clicking one sends it. Capped at 5 for layout.
      */
@@ -172,6 +178,7 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         greeting: config.greeting ?? 'Hi! How can I help you today?',
         connectionErrorMessage: config.connectionErrorMessage ?? "We couldn't reach the chat. Please try again in a moment.",
         startOpen: config.startOpen ?? false,
+        hideBranding: config.hideBranding ?? false,
         examplePrompts: (config.examplePrompts ?? []).filter((p) => p.trim().length > 0).slice(0, 5),
         requireName: config.requireName ?? false,
         requireEmail: config.requireEmail ?? false,
