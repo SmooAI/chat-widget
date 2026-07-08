@@ -232,6 +232,7 @@ Declarative attributes mirror the programmatic [`ChatWidgetConfig`](./src/config
 | `mode`          | `mode`           | `popover` (default) or `fullpage`.                 |
 | `start-open`    | `startOpen`      | Open the panel immediately (no launcher click).    |
 | `hide-branding` | `hideBranding`   | Hide the "powered by smooth-operator" tag + footer link. Default shown. |
+| `show-tool-activity` | `showToolActivity` | Show the agent's tool activity as inline chips interleaved with its prose. Default **off** (end-users normally shouldn't see raw tool calls). |
 | —               | `theme`          | Brand colors (see [Theming](#theming)).            |
 | —               | `userName` / `userEmail` | Optional participant identity.             |
 

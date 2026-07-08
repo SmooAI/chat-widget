@@ -141,6 +141,16 @@ export interface ChatWidgetConfig {
      * `require*` flags are ignored and the pre-chat form is skipped.
      */
     allowAnonymous?: boolean;
+    /**
+     * Show the agent's tool activity (grep / read_file / bash / knowledge_search…)
+     * as inline chips interleaved with its prose, mirroring the smooth daemon SPA.
+     *
+     * Defaults to **`false`**: for a customer-facing support widget, surfacing raw
+     * tool calls to an end-user is usually undesirable, so tool activity is hidden
+     * and only the assistant's prose renders. Enable it for internal / power-user
+     * surfaces where seeing what the agent did mid-turn is valuable.
+     */
+    showToolActivity?: boolean;
     /** Theme overrides. */
     theme?: ChatWidgetTheme;
 }
@@ -194,6 +204,7 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         collectConsent: config.collectConsent ?? true,
         allowChatRestore: config.allowChatRestore ?? true,
         allowAnonymous: config.allowAnonymous ?? false,
+        showToolActivity: config.showToolActivity ?? false,
         theme: {
             text: theme.text ?? '#f8fafc',
             background: theme.background ?? '#040d30',

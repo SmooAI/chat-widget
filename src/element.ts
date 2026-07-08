@@ -17,7 +17,16 @@
 import { AsYouType, isValidPhoneNumber, parsePhoneNumber } from 'libphonenumber-js/min';
 import type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
 import { needsUserInfo, resolveConfig } from './config.js';
-import { type ChatMessage, type Citation, type ConnectionStatus, ConversationController, type IdentityRestore, type Interrupt, SUPPORTED_INTERACTION_CAPABILITIES } from './conversation.js';
+import {
+    type ChatMessage,
+    type Citation,
+    type ConnectionStatus,
+    ConversationController,
+    type IdentityRestore,
+    type Interrupt,
+    SUPPORTED_INTERACTION_CAPABILITIES,
+    type ToolCall,
+} from './conversation.js';
 import { SMOOTH_ICON_SVG } from './logo.js';
 import { cleanCitationSnippet, escapeHtml, renderMarkdown, safeHttpUrl } from './markdown.js';
 import { buildStyles } from './styles.js';
@@ -52,7 +61,7 @@ function phoneToE164(value: string): string | null {
 /** Public smooth-operator repo — the "powered by" header tag + footer link here. */
 const SMOOTH_OPERATOR_URL = 'https://github.com/SmooAI/smooth-operator';
 
-const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'logo-url', 'placeholder', 'greeting', 'start-open', 'mode', 'hide-branding'] as const;
+const OBSERVED = ['endpoint', 'agent-id', 'agent-name', 'logo-url', 'placeholder', 'greeting', 'start-open', 'mode', 'hide-branding', 'show-tool-activity'] as const;
 
 /**
  * Inline SVG icons (static, trusted strings — never interpolated with user data).
@@ -75,6 +84,8 @@ const ICON = {
     user: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="8.2" r="3.4" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 19.5c.8-3.1 3.4-4.8 6.5-4.8s5.7 1.7 6.5 4.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
     /** Tool-confirmation interrupt — a shield. */
     shield: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3 5 6v5c0 4.4 3 7.2 7 8.5 4-1.3 7-4.1 7-8.5V6l-7-3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m9 11.5 2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    /** Tool-activity chip — a wrench. */
+    tool: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.7 6.3a3.5 3.5 0 0 0-4.6 4.3l-5 5a1.6 1.6 0 0 0 2.3 2.3l5-5a3.5 3.5 0 0 0 4.3-4.6l-2 2-1.7-.3-.3-1.7 2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
 } as const;
 
 /**
@@ -292,6 +303,10 @@ export class SmoothAgentChatElement extends HTMLElement {
     /** How many chars of {@link streamTarget} are currently shown. */
     private displayedLength = 0;
     private rafId = 0;
+    /** Block structure signature of the last-rendered streaming message (tool chips
+     *  only — text growth doesn't change it), so a chip add/resolve forces a rebuild
+     *  while plain trailing-text growth stays on the fast reveal path. */
+    private prevBlockSig = '';
 
     constructor() {
         super();
@@ -376,6 +391,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             collectConsent: this.overrides.collectConsent,
             allowChatRestore: this.overrides.allowChatRestore,
             allowAnonymous: this.overrides.allowAnonymous,
+            showToolActivity: this.overrides.showToolActivity ?? this.hasAttribute('show-tool-activity'),
             theme,
         };
     }
@@ -1046,19 +1062,50 @@ export class SmoothAgentChatElement extends HTMLElement {
             // finalize transition (streaming → done) needs the markdown render + sources
             last.streaming !== prevLast.streaming ||
             // first token after the typing indicator needs the bubble swapped in
-            (!!last.streaming && !prevLast.text && !!last.text);
+            (!!last.streaming && !prevLast.text && !!last.text) ||
+            // a tool chip was added or resolved (text growth alone doesn't change this)
+            this.blockSig(last) !== this.prevBlockSig;
 
         this.messages = messages;
+        this.prevBlockSig = this.blockSig(last);
 
-        if (!structural && last && last.streaming && last.id === this.streamMsgId) {
-            // Fast path: the streaming tail just grew. Bump the reveal target and
-            // let the rAF loop catch up — no DOM rebuild, no per-token reflow.
-            this.streamTarget = last.text;
+        if (!structural && last && last.streaming && this.tailKey(last) === this.streamMsgId) {
+            // Fast path: the streaming (trailing) text just grew. Bump the reveal
+            // target and let the rAF loop catch up — no DOM rebuild, no per-token
+            // reflow. `tailText` is the live trailing text block for a tool turn, or
+            // the whole message for a plain-prose turn.
+            this.streamTarget = this.tailText(last);
             this.ensureRevealLoop();
             return;
         }
 
         this.renderMessages();
+    }
+
+    /** True when an assistant message's turn invoked at least one tool. */
+    private hasToolBlocks(m?: ChatMessage): boolean {
+        return !!m?.blocks?.some((b) => b.kind === 'tool');
+    }
+
+    /** Signature that changes only when a tool chip is added or resolved (text growth is 'x'). */
+    private blockSig(m?: ChatMessage): string {
+        if (!m?.blocks) return '';
+        return m.blocks.map((b) => (b.kind === 'tool' ? `t:${b.tool.id}:${b.tool.done ? 1 : 0}` : 'x')).join('|');
+    }
+
+    /** The live (last) text block for a tool turn, else the whole message text. */
+    private tailText(m: ChatMessage): string {
+        if (this.hasToolBlocks(m) && m.blocks) {
+            const last = m.blocks[m.blocks.length - 1];
+            return last?.kind === 'text' ? last.text : '';
+        }
+        return m.text;
+    }
+
+    /** Reveal-binding key — composite for a tool-turn tail (so a new trailing block rebinds), else msg id. */
+    private tailKey(m: ChatMessage): string {
+        if (this.hasToolBlocks(m) && m.blocks) return `${m.id}#${m.blocks.length - 1}`;
+        return m.id;
     }
 
     private renderMessages(): void {
@@ -1087,6 +1134,16 @@ export class SmoothAgentChatElement extends HTMLElement {
         }
 
         for (const msg of this.messages) {
+            // Tool-activity turns (gated by `showToolActivity`) render as an ordered
+            // strip of prose bubbles + inline tool chips instead of one bubble.
+            if (msg.role === 'assistant' && this.hasToolBlocks(msg)) {
+                this.messagesEl.appendChild(this.buildRow('assistant', this.renderAssistantBlocks(msg)));
+                if (!msg.streaming && msg.citations && msg.citations.length > 0) {
+                    this.messagesEl.appendChild(this.renderSources(msg.citations));
+                }
+                continue;
+            }
+
             const bubble = document.createElement('div');
             bubble.className = `bubble ${msg.role}`;
             if (msg.role === 'assistant' && msg.streaming && !msg.text) {
@@ -1168,20 +1225,87 @@ export class SmoothAgentChatElement extends HTMLElement {
      * doesn't restart the reveal from zero), then resumes the loop.
      */
     private bindReveal(msg: ChatMessage, bubble: HTMLElement): void {
-        const carryOver = msg.id === this.streamMsgId ? Math.min(this.displayedLength, msg.text.length) : 0;
+        // `tailKey`/`tailText` collapse to the message id + full text for a plain
+        // prose turn, and to the live trailing text block for a tool turn — so both
+        // the single streaming bubble and a tool turn's trailing prose share this path.
+        const key = this.tailKey(msg);
+        const target = this.tailText(msg);
+        const carryOver = key === this.streamMsgId ? Math.min(this.displayedLength, target.length) : 0;
         this.streamBubbleEl = bubble;
-        this.streamMsgId = msg.id;
-        this.streamTarget = msg.text;
+        this.streamMsgId = key;
+        this.streamTarget = target;
         this.displayedLength = carryOver;
 
         if (this.prefersReducedMotion()) {
             // No animation: show everything immediately.
-            this.displayedLength = msg.text.length;
-            bubble.textContent = msg.text;
+            this.displayedLength = target.length;
+            bubble.textContent = target;
             return;
         }
-        bubble.textContent = msg.text.slice(0, this.displayedLength);
+        bubble.textContent = target.slice(0, this.displayedLength);
         this.ensureRevealLoop();
+    }
+
+    /**
+     * Render a tool-activity assistant turn as an ordered strip: prose bubbles and
+     * inline tool chips in the order the model produced them (mirrors the daemon
+     * SPA's `blocks`). The live trailing text block (while streaming) binds to the
+     * rAF reveal; earlier/finalized text blocks render as sanitized markdown.
+     */
+    private renderAssistantBlocks(msg: ChatMessage): HTMLElement {
+        const wrap = document.createElement('div');
+        wrap.className = 'blocks';
+        const blocks = msg.blocks ?? [];
+        const lastIdx = blocks.length - 1;
+        blocks.forEach((block, i) => {
+            if (block.kind === 'tool') {
+                wrap.appendChild(this.buildToolChip(block.tool));
+                return;
+            }
+            const bubble = document.createElement('div');
+            bubble.className = 'bubble assistant';
+            if (msg.streaming && i === lastIdx) {
+                // Live trailing prose → plain text + cursor, driven by the reveal loop.
+                bubble.classList.add('cursor');
+                this.bindReveal(msg, bubble);
+            } else {
+                // Settled prose → sanitized markdown (same allowlisted renderer as bubbles).
+                bubble.classList.add('md');
+                bubble.innerHTML = renderMarkdown(block.text);
+            }
+            wrap.appendChild(bubble);
+        });
+        return wrap;
+    }
+
+    /**
+     * A single tool-activity chip: icon + tool name + status (running… / done / error),
+     * with a truncated args preview. Tool name/args are set via `textContent` so a
+     * tool payload can never inject markup.
+     */
+    private buildToolChip(tool: ToolCall): HTMLElement {
+        const chip = document.createElement('div');
+        chip.className = `toolchip ${tool.done ? (tool.isError ? 'error' : 'done') : 'running'}`;
+        chip.setAttribute('part', 'tool-chip');
+
+        const icon = document.createElement('span');
+        icon.className = 'ti';
+        icon.innerHTML = ICON.tool; // static, trusted
+        const name = document.createElement('span');
+        name.className = 'tn';
+        name.textContent = tool.name || 'tool';
+        const status = document.createElement('span');
+        status.className = 'ts';
+        status.textContent = tool.done ? (tool.isError ? 'error' : 'done') : 'running…';
+        chip.append(icon, name, status);
+
+        if (tool.args && tool.args !== '{}' && tool.args !== '""') {
+            const args = document.createElement('span');
+            args.className = 'ta';
+            args.textContent = tool.args.length > 80 ? `${tool.args.slice(0, 80)}…` : tool.args;
+            chip.appendChild(args);
+        }
+        return chip;
     }
 
     /** Start the rAF loop if it isn't already running. */

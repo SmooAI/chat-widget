@@ -61,6 +61,32 @@ export type { Citation };
 
 export type Role = 'user' | 'assistant';
 
+/**
+ * One tool invocation within an assistant turn. Mirrors the smooth daemon SPA's
+ * `ToolCall` (`crates/smooth-web/web/src/operator.ts`): opens `done: false` on the
+ * tool call and resolves on the tool result.
+ */
+export interface ToolCall {
+    /** Stable id for keyed rendering (assigned when the call opens). */
+    id: string;
+    name: string;
+    /** Raw arguments, JSON-stringified. */
+    args: string;
+    /** Present once the tool resolves. */
+    result?: string;
+    isError?: boolean;
+    done: boolean;
+}
+
+/**
+ * One ordered segment of an assistant turn: a run of prose, or a tool call.
+ * Preserves the interleave order the model produced (say a bit → call a tool →
+ * say a bit → …) so the UI can render tool chips INLINE where the model called
+ * them. Mirrors the daemon SPA's `MessageBlock`. Only populated when the widget
+ * is configured with `showToolActivity: true`.
+ */
+export type MessageBlock = { kind: 'text'; text: string } | { kind: 'tool'; tool: ToolCall };
+
 export interface ChatMessage {
     id: string;
     role: Role;
@@ -68,6 +94,12 @@ export interface ChatMessage {
     text: string;
     /** True while an assistant message is still streaming. */
     streaming: boolean;
+    /**
+     * Ordered text + tool segments, interleaved as the model produced them. Present
+     * only on assistant messages when `showToolActivity` is enabled (absent
+     * otherwise — the default popover renders `text` alone, byte-for-byte unchanged).
+     */
+    blocks?: MessageBlock[];
     /**
      * Sources that grounded an assistant answer, when the terminal
      * `eventual_response` carried any. Optional + back-compatible: absent when
@@ -242,6 +274,52 @@ function wireMessageToChat(m: WireMessage, idx: number): ChatMessage | null {
     if (!text) return null;
     const role: Role = m.direction === 'outbound' ? 'assistant' : 'user';
     return { id: typeof m.id === 'string' ? m.id : `hist-${idx}`, role, text, streaming: false };
+}
+
+let toolSeq = 0;
+const nextToolId = (): string => `tool-${++toolSeq}`;
+
+/** Grow the trailing text block, or open a new one if the last block was a tool. */
+function growTextBlock(blocks: MessageBlock[], text: string): void {
+    if (!text) return;
+    const last = blocks[blocks.length - 1];
+    if (last && last.kind === 'text') last.text += text;
+    else blocks.push({ kind: 'text', text });
+}
+
+/**
+ * Fold a `stream_chunk` node-state into the ordered block list, returning `true`
+ * when the chunk carried tool activity.
+ *
+ * Tool activity rides `state.rawResponse.toolCall` / `state.rawResponse.toolResult`
+ * — **NOT** `state.toolResult`. Reading the wrong path leaves every chip stuck on
+ * "running…" forever (the exact bug the daemon SPA hit and this mirror avoids).
+ */
+function applyToolChunk(blocks: MessageBlock[], state: unknown): boolean {
+    const raw = (state as { rawResponse?: unknown } | null | undefined)?.rawResponse;
+    if (!raw || typeof raw !== 'object') return false;
+    const call = (raw as { toolCall?: { name?: string; arguments?: unknown } }).toolCall;
+    const res = (raw as { toolResult?: { name?: string; isError?: boolean; result?: unknown } }).toolResult;
+    if (call) {
+        const args = typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {});
+        blocks.push({ kind: 'tool', tool: { id: nextToolId(), name: call.name ?? '', args, done: false } });
+        return true;
+    }
+    if (res) {
+        const result = typeof res.result === 'string' ? res.result : JSON.stringify(res.result ?? '');
+        // Complete the most-recent still-open tool block matching this name.
+        for (let i = blocks.length - 1; i >= 0; i--) {
+            const b = blocks[i];
+            if (b && b.kind === 'tool' && b.tool.name === (res.name ?? '') && !b.tool.done) {
+                b.tool.done = true;
+                b.tool.isError = !!res.isError;
+                b.tool.result = result;
+                break;
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 export class ConversationController {
@@ -674,7 +752,8 @@ export class ConversationController {
         this.messages.push({ id: this.nextId('u'), role: 'user', text: trimmed, streaming: false });
 
         // 2. Placeholder assistant bubble we grow as tokens arrive.
-        const assistant: ChatMessage = { id: this.nextId('a'), role: 'assistant', text: '', streaming: true };
+        const showTools = this.config.showToolActivity === true;
+        const assistant: ChatMessage = { id: this.nextId('a'), role: 'assistant', text: '', streaming: true, blocks: showTools ? [] : undefined };
         this.messages.push(assistant);
         this.emitMessages();
 
@@ -687,6 +766,14 @@ export class ConversationController {
                     const token = event.token ?? event.data?.token ?? '';
                     if (token) {
                         assistant.text += token;
+                        // Grow the trailing text block so prose interleaves with any
+                        // tool chips in the order the model produced them.
+                        if (showTools && assistant.blocks) growTextBlock(assistant.blocks, token);
+                        this.emitMessages();
+                    }
+                } else if (showTools && event.type === 'stream_chunk') {
+                    // Tool activity (gated). Read state.rawResponse.toolCall/.toolResult.
+                    if (assistant.blocks && applyToolChunk(assistant.blocks, event.data?.state)) {
                         this.emitMessages();
                     }
                 } else {
@@ -714,6 +801,11 @@ export class ConversationController {
             const suggestions = extractSuggestions(inner?.response);
             if (suggestions.length > 0) {
                 assistant.suggestions = suggestions;
+            }
+            // Only keep blocks for turns that actually invoked a tool — a prose-only
+            // turn drops back to the normal markdown text path (with the final text).
+            if (assistant.blocks && !assistant.blocks.some((b) => b.kind === 'tool')) {
+                assistant.blocks = undefined;
             }
             assistant.streaming = false;
             this.emitMessages();
