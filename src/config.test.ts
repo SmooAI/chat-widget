@@ -11,6 +11,9 @@ describe('resolveConfig', () => {
         expect(r.placeholder).toBe('Type a message…');
         expect(r.greeting).toBe('Hi! How can I help you today?');
         expect(r.startOpen).toBe(false);
+        // Tool activity is hidden by default — a customer-facing widget shouldn't
+        // expose raw tool calls to an end-user unless explicitly opted in.
+        expect(r.showToolActivity).toBe(false);
         expect(r.theme.primary).toBe('#00a6a6');
         // The redesign defaults the border to a translucent value for the glass look.
         expect(r.theme.border).toBe('rgba(255, 255, 255, 0.1)');
@@ -20,6 +23,10 @@ describe('resolveConfig', () => {
         const r = resolveConfig(base);
         expect(r.endpoint).toBe('wss://example/ws');
         expect(r.agentId).toBe('agent-1');
+    });
+
+    it('honors showToolActivity when opted in', () => {
+        expect(resolveConfig({ ...base, showToolActivity: true }).showToolActivity).toBe(true);
     });
 
     it('derives userBubble / userBubbleText from primary when unset', () => {

@@ -39,8 +39,10 @@ export {
     type ConnectionStatus,
     type ConversationEvents,
     type IdentityRestore,
+    type MessageBlock,
     type RestorableConversation,
     type Role,
+    type ToolCall,
     type UserInfo,
 } from './conversation.js';
 export {

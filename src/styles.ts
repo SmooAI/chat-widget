@@ -29,6 +29,7 @@ export function buildStyles(theme: ResolvedTheme, mode: ChatWidgetMode = 'popove
     --sac-bg: ${theme.background};
     --sac-primary: ${theme.primary};
     --sac-primary-text: ${theme.primaryText};
+    --sac-secondary: ${theme.secondary};
     --sac-assistant-bubble: ${theme.assistantBubble};
     --sac-assistant-bubble-text: ${theme.assistantBubbleText};
     --sac-user-bubble: ${theme.userBubble};
@@ -348,6 +349,47 @@ ${
     animation: sac-blink 1s steps(2, start) infinite;
 }
 @keyframes sac-blink { to { opacity: 0 } }
+
+/* Interleaved tool-activity strip (gated by showToolActivity): prose bubbles
+   and inline tool chips stacked in the order the model produced them. */
+.blocks { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+.blocks .bubble { align-self: flex-start; }
+.toolchip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 5px 10px;
+    border-radius: 99px;
+    font-size: 12px;
+    line-height: 1.3;
+    color: color-mix(in srgb, var(--sac-text) 78%, transparent);
+    background: color-mix(in srgb, var(--sac-text) 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--sac-text) 12%, transparent);
+    animation: sac-msg-in .3s var(--sac-ease) both;
+}
+.toolchip .ti { display: inline-flex; flex: none; opacity: .8; }
+.toolchip .ti svg { width: 13px; height: 13px; }
+.toolchip .tn { font-weight: 600; letter-spacing: .01em; }
+.toolchip .ts { opacity: .7; }
+.toolchip .ta {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    opacity: .6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.toolchip.running { border-color: color-mix(in srgb, var(--sac-primary) 45%, transparent); }
+.toolchip.running .ts { color: var(--sac-primary); opacity: 1; animation: sac-typing 1.3s ease-in-out infinite; }
+.toolchip.done .ts::before { content: '✓ '; }
+.toolchip.error {
+    color: var(--sac-secondary);
+    border-color: color-mix(in srgb, var(--sac-secondary) 50%, transparent);
+    background: color-mix(in srgb, var(--sac-secondary) 10%, transparent);
+}
+.toolchip.error .ts::before { content: '! '; }
 
 /* ─────────────── Rendered markdown (assistant bubbles / snippets) ─────────── */
 /* The renderer (markdown.ts) emits a small allowlisted set of tags; these rules
