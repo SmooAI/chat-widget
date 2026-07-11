@@ -328,6 +328,8 @@ export class ConversationController {
     private readonly store: StoreApi<WidgetStore>;
     private client: SmoothAgentClient | null = null;
     private sessionId: string | null = null;
+    /** Conversation id of the live session (create or resume) — lets voice join the same thread. */
+    private conversationId: string | null = null;
     private readonly messages: ChatMessage[] = [];
     private status: ConnectionStatus = 'idle';
     private seq = 0;
@@ -382,6 +384,23 @@ export class ConversationController {
 
     get connectionStatus(): ConnectionStatus {
         return this.status;
+    }
+
+    /** Conversation id of the live session, or null before connect (voice passes this as `conversation_id`). */
+    get currentConversationId(): string | null {
+        return this.conversationId;
+    }
+
+    /**
+     * Append an already-finalized message to the transcript and emit — the voice
+     * path reuses this so `transcript_final` (user) and `reply_text` (assistant)
+     * turns land in the same message list / render pipeline as typed chat.
+     */
+    appendLocalMessage(role: Role, text: string): void {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        this.messages.push({ id: this.nextId(role === 'user' ? 'u' : 'a'), role, text: trimmed, streaming: false });
+        this.emitMessages();
     }
 
     /** The persisted store, exposed so the view can read identity for the pre-chat gate. */
@@ -690,6 +709,7 @@ export class ConversationController {
             ...(metadata ? { metadata } : {}),
         });
         this.sessionId = session.sessionId;
+        this.conversationId = session.conversationId ?? null;
         this.store.getState().setSessionId(session.sessionId);
     }
 
@@ -699,7 +719,7 @@ export class ConversationController {
      */
     private async tryResume(sessionId: string): Promise<boolean> {
         if (!this.client) return false;
-        let snap: { status?: 'active' | 'idle' | 'ended' };
+        let snap: { status?: 'active' | 'idle' | 'ended'; conversationId?: string };
         try {
             snap = await this.client.getSession({ sessionId });
         } catch {
@@ -708,6 +728,7 @@ export class ConversationController {
         if (snap.status === 'ended') return false;
 
         this.sessionId = sessionId;
+        this.conversationId = snap.conversationId ?? null;
         await this.hydrateHistory(sessionId);
         return true;
     }
@@ -1052,6 +1073,7 @@ export class ConversationController {
         this.client?.disconnect('widget closed');
         this.client = null;
         this.sessionId = null;
+        this.conversationId = null;
         this.activeRequestId = null;
         // A full teardown ends the controller lifecycle: a subsequent connect() is a
         // genuine re-open and may resume again, so re-arm the resume probe.

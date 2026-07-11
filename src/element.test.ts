@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { defineChatWidget, ELEMENT_TAG, INTERACTION_CARDS, safeHttpUrl } from './element.js';
 import { type Interrupt, SUPPORTED_INTERACTION_CAPABILITIES } from './conversation.js';
+import { VoiceSession } from './voice-session.js';
 
 describe('safeHttpUrl', () => {
     it('accepts absolute http(s) URLs and returns the normalized href', () => {
@@ -468,6 +469,82 @@ describe('fullpage container sizing (composer-clip regression)', () => {
         const el = mountFullpage(0);
         expect(el.hasAttribute('data-viewport-fallback')).toBe(true);
     });
+});
+
+describe('voice config gating (SMOODEV-2534)', () => {
+    afterEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    function mountCfg(cfg: Record<string, unknown>): HTMLElement {
+        defineChatWidget();
+        const el = document.createElement(ELEMENT_TAG) as HTMLElement & { configure: (c: Record<string, unknown>) => void };
+        el.setAttribute('endpoint', 'wss://e/ws');
+        el.setAttribute('agent-id', 'a1');
+        el.configure(cfg);
+        document.body.appendChild(el);
+        return el;
+    }
+
+    it('renders NO mic button by default (voice OFF = zero voice UI)', () => {
+        const sr = mountCfg({}).shadowRoot!;
+        expect(sr.querySelector('.composer .send')).not.toBeNull();
+        expect(sr.querySelector('.composer .mic')).toBeNull();
+    });
+
+    it('renders no mic button when voice is explicitly disabled', () => {
+        const sr = mountCfg({ voice: { enabled: false } }).shadowRoot!;
+        expect(sr.querySelector('.composer .mic')).toBeNull();
+    });
+
+    it('renders the mic toggle in the composer when voice is enabled', () => {
+        const sr = mountCfg({ voice: { enabled: true } }).shadowRoot!;
+        const mic = sr.querySelector('.composer .mic') as HTMLButtonElement | null;
+        expect(mic).not.toBeNull();
+        expect(mic?.getAttribute('aria-pressed')).toBe('false');
+        expect(mic?.getAttribute('aria-label')).toBe('Start voice');
+        expect(mic?.querySelector('svg')).not.toBeNull();
+    });
+
+    it('starting voice passes the configured url + agentId and lights the button', async () => {
+        // No real audio/WS in jsdom — stub the session's start; the element's
+        // wiring (options threaded, UI state) is what's under test here.
+        const origStart = VoiceSession.prototype.start;
+        VoiceSession.prototype.start = () => Promise.resolve();
+        try {
+            await runStartVoiceScenario();
+        } finally {
+            VoiceSession.prototype.start = origStart;
+        }
+    });
+
+    async function runStartVoiceScenario(): Promise<void> {
+        const el = mountCfg({ voice: { enabled: true, url: 'wss://voice.test/ws' } });
+        const sr = el.shadowRoot!;
+        const priv = el as unknown as {
+            startVoice: () => Promise<void>;
+            voiceSession: { stop: () => void } | null;
+            controller: unknown;
+        };
+        // Stub the controller seam (same pattern as the other element tests).
+        priv.controller = {
+            currentConversationId: 'conv-42',
+            appendLocalMessage: () => {},
+            connect: () => Promise.resolve(),
+            disconnect: () => {},
+        };
+        await priv.startVoice();
+        const session = priv.voiceSession as unknown as { opts: { url?: string; agentId: string; conversationId?: string } } | null;
+        expect(session).not.toBeNull();
+        expect(session!.opts.url).toBe('wss://voice.test/ws');
+        expect(session!.opts.agentId).toBe('a1');
+        // The text thread's conversation id rides along so voice resumes it.
+        expect(session!.opts.conversationId).toBe('conv-42');
+        const mic = sr.querySelector('.composer .mic') as HTMLButtonElement;
+        expect(mic.classList.contains('active')).toBe(true);
+        expect(mic.getAttribute('aria-pressed')).toBe('true');
+        expect(mic.getAttribute('aria-label')).toBe('Stop voice');
+    }
 });
 
 describe('Rich Interactions card registry', () => {
