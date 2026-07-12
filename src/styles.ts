@@ -546,6 +546,47 @@ ${
 .send:hover { transform: translateY(-1px) scale(1.05); }
 .send:active { transform: scale(.94); }
 .send:disabled { opacity: .4; cursor: default; transform: none; box-shadow: none; }
+
+/* Voice mic toggle (SMOODEV-2534) — ghost twin of .send; lights up while live. */
+.mic {
+    width: 38px; height: 38px;
+    flex: none;
+    border: 1px solid color-mix(in srgb, var(--sac-border) 80%, transparent);
+    border-radius: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: color-mix(in srgb, var(--sac-text) 65%, transparent);
+    transition: transform .2s var(--sac-ease), color .2s ease, background .25s ease, box-shadow .25s ease;
+}
+.mic svg { width: 18px; height: 18px; }
+.mic:hover { color: var(--sac-text); transform: translateY(-1px) scale(1.05); }
+.mic:active { transform: scale(.94); }
+.mic.active {
+    border-color: transparent;
+    background: linear-gradient(150deg, var(--sac-primary), var(--sac-primary-2));
+    color: var(--sac-primary-text);
+    animation: sac-mic-pulse 1.6s ease-out infinite;
+}
+/* Listening → soft expanding ring off the button (mirrors the presence pulse). */
+@keyframes sac-mic-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--sac-primary) 45%, transparent); }
+    70% { box-shadow: 0 0 0 9px color-mix(in srgb, var(--sac-primary) 0%, transparent); }
+    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--sac-primary) 0%, transparent); }
+}
+/* Agent TTS playing → faster secondary-accent shimmer so "speaking" reads distinctly. */
+.mic.active.speaking {
+    animation: sac-mic-speaking 0.9s ease-in-out infinite;
+}
+@keyframes sac-mic-speaking {
+    0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--sac-secondary) 35%, transparent); }
+    50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--sac-secondary) 12%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .mic.active, .mic.active.speaking { animation: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--sac-primary) 40%, transparent); }
+}
 .footer {
     text-align: center;
     margin-top: 9px;

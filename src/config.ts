@@ -6,6 +6,19 @@
  * {@link mountChatWidget} / `element.configure(...)`).
  */
 import { safeHttpUrl } from './markdown.js';
+import { DEFAULT_VOICE_URL } from './voice-session.js';
+
+/**
+ * Browser voice input/output (SMOODEV-2534). OFF by default — when disabled the
+ * widget renders zero voice UI. When enabled, a mic toggle appears in the
+ * composer and speech flows over the browser-voice WebSocket.
+ */
+export interface ChatWidgetVoiceConfig {
+    /** Turn the voice feature on. Default `false`. */
+    enabled?: boolean;
+    /** Browser-voice WS endpoint. Defaults to the hosted SmooAI voice service. */
+    url?: string;
+}
 
 export interface ChatWidgetTheme {
     /** Foreground text color for the widget chrome. */
@@ -151,6 +164,8 @@ export interface ChatWidgetConfig {
      * surfaces where seeing what the agent did mid-turn is valuable.
      */
     showToolActivity?: boolean;
+    /** Browser voice input/output. OFF by default (zero UI when off). */
+    voice?: ChatWidgetVoiceConfig;
     /** Theme overrides. */
     theme?: ChatWidgetTheme;
 }
@@ -158,8 +173,9 @@ export interface ChatWidgetConfig {
 /** The fully-resolved theme (canonical keys only — aliases are folded in). */
 export type ResolvedTheme = Required<Omit<ChatWidgetTheme, 'chatBubbleInbound' | 'chatBubbleInboundText' | 'chatBubbleOutbound' | 'chatBubbleOutboundText'>>;
 
-export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone' | 'authContext' | 'logoUrl'>> & {
+export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone' | 'authContext' | 'logoUrl' | 'voice'>> & {
     theme: ResolvedTheme;
+    voice: { enabled: boolean; url: string };
     userName?: string;
     userEmail?: string;
     userPhone?: string;
@@ -205,6 +221,7 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         allowChatRestore: config.allowChatRestore ?? true,
         allowAnonymous: config.allowAnonymous ?? false,
         showToolActivity: config.showToolActivity ?? false,
+        voice: { enabled: config.voice?.enabled ?? false, url: config.voice?.url ?? DEFAULT_VOICE_URL },
         theme: {
             text: theme.text ?? '#f8fafc',
             background: theme.background ?? '#040d30',

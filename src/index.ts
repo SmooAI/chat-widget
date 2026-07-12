@@ -26,7 +26,25 @@ export {
     mountChatWidget,
     mountFullPageChat,
 } from './element.js';
-export type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme } from './config.js';
+export type { ChatWidgetConfig, ChatWidgetMode, ChatWidgetTheme, ChatWidgetVoiceConfig } from './config.js';
+// Browser voice input/output (SMOODEV-2534) — mic capture + TTS playback over
+// the browser-voice WS. Gated by `voice.enabled` (OFF by default).
+export {
+    DEFAULT_VOICE_URL,
+    downsampleTo16k,
+    PcmPlayer,
+    rmsLevel,
+    VOICE_SAMPLE_RATE,
+    VoiceSession,
+    type PlayerAudioContext,
+    type StartCapture,
+    type VoicePlayer,
+    type VoiceSessionEvents,
+    type VoiceSessionOptions,
+    type VoiceSessionSeams,
+    type VoiceSessionState,
+    type VoiceWebSocket,
+} from './voice-session.js';
 // The deferred loader (also shipped as the `./loader` IIFE for `<script>` embeds):
 // installs the idle/intent/fallback scheduler that lazily injects the widget
 // module so it never competes with the host page's LCP/TBT.

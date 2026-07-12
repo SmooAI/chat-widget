@@ -30,6 +30,7 @@ import {
 import { SMOOTH_ICON_SVG } from './logo.js';
 import { cleanCitationSnippet, escapeHtml, renderMarkdown, safeHttpUrl } from './markdown.js';
 import { buildStyles } from './styles.js';
+import { VoiceSession } from './voice-session.js';
 
 export const ELEMENT_TAG = 'smooth-agent-chat';
 
@@ -86,6 +87,8 @@ const ICON = {
     shield: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3 5 6v5c0 4.4 3 7.2 7 8.5 4-1.3 7-4.1 7-8.5V6l-7-3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m9 11.5 2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
     /** Tool-activity chip — a wrench. */
     tool: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.7 6.3a3.5 3.5 0 0 0-4.6 4.3l-5 5a1.6 1.6 0 0 0 2.3 2.3l5-5a3.5 3.5 0 0 0 4.3-4.6l-2 2-1.7-.3-.3-1.7 2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
+    /** Voice toggle — a microphone. */
+    mic: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="3.5" width="6" height="11" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5M9 20.5h6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
 } as const;
 
 /**
@@ -277,6 +280,10 @@ export class SmoothAgentChatElement extends HTMLElement {
     private allowChatRestore = true;
     /** True while the pre-chat identity gate is showing (blocks premature connect). */
     private gating = false;
+    /** Voice config (SMOODEV-2534) — enabled=false renders zero voice UI. */
+    private voiceCfg: { enabled: boolean; url: string } = { enabled: false, url: '' };
+    /** Live voice session, or null when voice is off. */
+    private voiceSession: VoiceSession | null = null;
 
     // Cached DOM refs (populated in render()).
     private panelEl: HTMLElement | null = null;
@@ -286,6 +293,7 @@ export class SmoothAgentChatElement extends HTMLElement {
     private dotEl: HTMLElement | null = null;
     private inputEl: HTMLTextAreaElement | null = null;
     private sendBtn: HTMLButtonElement | null = null;
+    private micBtn: HTMLButtonElement | null = null;
     private suggestionsEl: HTMLElement | null = null;
 
     // ── Smooth streaming reveal ──
@@ -321,6 +329,7 @@ export class SmoothAgentChatElement extends HTMLElement {
     disconnectedCallback(): void {
         this.mounted = false;
         this.resetReveal();
+        this.stopVoice();
         this.controller?.disconnect();
         this.controller = null;
     }
@@ -392,6 +401,7 @@ export class SmoothAgentChatElement extends HTMLElement {
             allowChatRestore: this.overrides.allowChatRestore,
             allowAnonymous: this.overrides.allowAnonymous,
             showToolActivity: this.overrides.showToolActivity ?? this.hasAttribute('show-tool-activity'),
+            voice: this.overrides.voice,
             theme,
         };
     }
@@ -527,6 +537,11 @@ export class SmoothAgentChatElement extends HTMLElement {
         const restoreBtn = this.allowChatRestore ? `<button type="button" class="restore-link">Restore my chats</button>` : '';
         const footerInner = [brandingHtml, restoreBtn].filter(Boolean).join(' · ');
         const footerHtml = footerInner ? `<div class="footer">${footerInner}</div>` : '';
+        // Voice (SMOODEV-2534): mic toggle in the composer, only when enabled.
+        this.voiceCfg = resolved.voice;
+        const micHtml = resolved.voice.enabled
+            ? `<button class="mic" type="button" aria-label="Start voice" aria-pressed="false" title="Talk to ${escapeHtml(resolved.agentName)}">${ICON.mic}</button>`
+            : '';
         const chatHtml = `
                 <div class="messages"></div>
                 <div class="reply-suggestions"></div>
@@ -534,6 +549,7 @@ export class SmoothAgentChatElement extends HTMLElement {
                 <div class="composer-wrap">
                     <div class="composer">
                         <textarea rows="1" placeholder="${escapeHtml(resolved.placeholder)}"></textarea>
+                        ${micHtml}
                         <button class="send" type="button" aria-label="Send message">${ICON.send}</button>
                     </div>
                     ${footerHtml}
@@ -555,8 +571,10 @@ export class SmoothAgentChatElement extends HTMLElement {
         if (logoSvg) logoSvg.setAttribute('class', 'logo');
 
         // A full DOM rebuild invalidates any cached streaming-bubble ref; cancel
-        // the in-flight reveal loop so renderMessages can re-bind cleanly.
+        // the in-flight reveal loop so renderMessages can re-bind cleanly. A live
+        // voice session is bound to the old composer's mic button — end it too.
         this.resetReveal();
+        this.stopVoice();
         this.root.replaceChildren(style, container);
 
         this.launcherEl = container.querySelector('.launcher');
@@ -566,12 +584,14 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.dotEl = container.querySelector('.dot');
         this.inputEl = container.querySelector('textarea');
         this.sendBtn = container.querySelector('.send');
+        this.micBtn = container.querySelector('.mic');
         this.interruptEl = container.querySelector('.interrupt');
         this.suggestionsEl = container.querySelector('.reply-suggestions');
 
         this.launcherEl?.addEventListener('click', () => this.openChat());
         container.querySelector('.close')?.addEventListener('click', () => this.closeChat());
         this.sendBtn?.addEventListener('click', () => this.submit());
+        this.micBtn?.addEventListener('click', () => this.toggleVoice());
         this.inputEl?.addEventListener('input', () => this.autosize());
         this.inputEl?.addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter' && !ev.shiftKey) {
@@ -1523,6 +1543,99 @@ export class SmoothAgentChatElement extends HTMLElement {
         const busy = this.status === 'connecting';
         if (this.sendBtn) this.sendBtn.disabled = busy;
         if (this.inputEl) this.inputEl.disabled = busy;
+    }
+
+    // ───────────────────────── Voice (SMOODEV-2534) ─────────────────────────────
+
+    /**
+     * Mic button: start a voice session, or — when one is live — end it. Hitting
+     * the button while the agent's TTS is playing barges in first (interrupt +
+     * playback flush) so the audio dies instantly, then the session ends.
+     */
+    private toggleVoice(): void {
+        if (this.voiceSession) {
+            if (this.voiceSession.isSpeaking) this.voiceSession.interrupt();
+            this.stopVoice();
+            return;
+        }
+        void this.startVoice();
+    }
+
+    private async startVoice(): Promise<void> {
+        if (!this.controller || this.voiceSession || !this.voiceCfg.enabled) return;
+        const config = this.readConfig();
+        if (!config) return;
+        // Best-effort: join the text thread when one exists. If the text session
+        // hasn't connected yet, voice starts a fresh thread (the frozen protocol
+        // never returns the voice-created conversation id, so it can't be adopted
+        // for later text turns — tracked as a follow-up on the server protocol).
+        const conversationId = this.controller.currentConversationId ?? undefined;
+        const controller = this.controller;
+        const session = new VoiceSession(
+            { url: this.voiceCfg.url, agentId: config.agentId, conversationId },
+            {
+                onTranscriptPartial: (text) => {
+                    // Live partial transcript in the input area while listening.
+                    if (this.inputEl) {
+                        this.inputEl.value = text;
+                        this.autosize();
+                    }
+                },
+                onTranscriptFinal: (text) => {
+                    if (this.inputEl) {
+                        this.inputEl.value = '';
+                        this.autosize();
+                    }
+                    // Finalized speech lands as a normal user message.
+                    controller.appendLocalMessage('user', text);
+                },
+                onReplyText: (text) => {
+                    // Agent replies render through the normal chat message path.
+                    controller.appendLocalMessage('assistant', text);
+                },
+                onSpeaking: (speaking) => {
+                    this.micBtn?.classList.toggle('speaking', speaking);
+                },
+                onError: () => this.stopVoice(),
+                onEnded: () => {
+                    // Server-side end (handoff / close) — reset the UI. stopVoice()
+                    // is idempotent, so a local stop lands here harmlessly too.
+                    this.voiceSession = null;
+                    this.syncVoiceUi(false);
+                },
+            },
+        );
+        this.voiceSession = session;
+        this.syncVoiceUi(true);
+        try {
+            await session.start();
+        } catch {
+            // Mic permission denied / audio unavailable — back to text.
+            this.voiceSession = null;
+            this.syncVoiceUi(false);
+        }
+    }
+
+    /** End any live voice session and reset the composer UI. Idempotent. */
+    private stopVoice(): void {
+        const session = this.voiceSession;
+        this.voiceSession = null;
+        session?.stop();
+        this.syncVoiceUi(false);
+    }
+
+    /** Toggle the mic button's listening state + clear the partial transcript. */
+    private syncVoiceUi(active: boolean): void {
+        this.micBtn?.classList.toggle('active', active);
+        this.micBtn?.setAttribute('aria-pressed', String(active));
+        this.micBtn?.setAttribute('aria-label', active ? 'Stop voice' : 'Start voice');
+        if (!active) {
+            this.micBtn?.classList.remove('speaking');
+            if (this.inputEl && this.inputEl.value) {
+                this.inputEl.value = '';
+                this.autosize();
+            }
+        }
     }
 
     private submit(): void {
