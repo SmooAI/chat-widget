@@ -17,7 +17,7 @@
  *   - cross-device request → verify → resolve → replay over the HTTP routes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ConversationController, type ConversationEvents, httpBaseFromWsEndpoint, type IdentityRestore } from './conversation.js';
+import { ConversationController, type ConversationEvents, httpBaseFromWsEndpoint, type IdentityRestore, normalizeParagraphs } from './conversation.js';
 import { createWidgetStore } from './persistence.js';
 
 const ENDPOINT = 'wss://example.test/ws';
@@ -359,6 +359,78 @@ describe('ConversationController — suggested replies (from eventual_response)'
         withSendResponse({ responseParts: ['Sure'], suggestedNextActions: 'not-an-array' });
         await controller.send('again');
         expect((onMessages.mock.calls.at(-1)?.[0] as Array<{ suggestions?: string[] }>).at(-1)?.suggestions).toBeUndefined();
+    });
+});
+
+describe('normalizeParagraphs', () => {
+    it('collapses 3+ newlines to a single paragraph break', () => {
+        expect(normalizeParagraphs('A\n\n\nB')).toBe('A\n\nB');
+        expect(normalizeParagraphs('A\n\n\n\n\nB')).toBe('A\n\nB');
+    });
+    it('is a no-op on well-formed text (single break or paragraph break)', () => {
+        expect(normalizeParagraphs('A\nB')).toBe('A\nB');
+        expect(normalizeParagraphs('A\n\nB')).toBe('A\n\nB');
+        // Idempotent — the finalized join it wraps stays byte-identical.
+        const joined = ['A', 'B'].join('\n\n');
+        expect(normalizeParagraphs(joined)).toBe(joined);
+    });
+});
+
+describe('ConversationController — streaming render matches finalized render (SMOODEV-2534)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    it('never shows an extra blank line mid-stream: streamed text agrees with the finalized join', async () => {
+        // The model streams paragraph one, then an extra blank line (a `\n\n\n` run
+        // split across tokens), then paragraph two. The finalized `responseParts`
+        // join uses `\n\n`. Mid-stream must never render more blank lines than the
+        // finalized message.
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'send_message') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                for (const token of ['Para one.', '\n\n', '\n', 'Para two.']) {
+                    reply({ type: 'stream_token', requestId, token });
+                }
+                reply({
+                    type: 'eventual_response',
+                    requestId,
+                    status: 200,
+                    data: { requestId, status: 200, data: { messageId: 'm1', response: { responseParts: ['Para one.', 'Para two.'] } } },
+                });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+
+        type Snap = Array<{ role: string; streaming: boolean; text: string }>;
+        const assistantSnaps = onMessages.mock.calls
+            .map((c) => (c[0] as Snap).at(-1))
+            .filter((m): m is { role: string; streaming: boolean; text: string } => m?.role === 'assistant');
+
+        // No emitted assistant snapshot — streaming or final — carries a 3+ newline run.
+        for (const snap of assistantSnaps) {
+            expect(snap.text).not.toMatch(/\n{3,}/);
+        }
+
+        const finalText = ['Para one.', 'Para two.'].join('\n\n');
+        // Finalized output is byte-identical to the raw `responseParts.join('\n\n')`.
+        const finalized = assistantSnaps.at(-1)!;
+        expect(finalized.streaming).toBe(false);
+        expect(finalized.text).toBe(finalText);
+        // The last mid-stream render already agrees with the finalized render — no
+        // jump / flicker when the terminal event lands.
+        const lastStreaming = assistantSnaps.filter((s) => s.streaming).at(-1)!;
+        expect(lastStreaming.text).toBe(finalText);
     });
 });
 
