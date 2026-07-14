@@ -208,12 +208,33 @@ export interface ConversationEvents {
     onIdentityRestore?: (state: IdentityRestore) => void;
 }
 
+/**
+ * Paragraph separator the server uses to join `responseParts`. The streaming
+ * render (raw-token accumulation) and the finalized render (this join) MUST use
+ * the same separation, or a transient extra blank line flickers mid-stream and
+ * then vanishes when the terminal `eventual_response` re-renders (SMOODEV-2534).
+ */
+const PARAGRAPH_SEP = '\n\n';
+
+/**
+ * Collapse any run of 3+ newlines down to a single paragraph break. Idempotent,
+ * and a no-op on text already separated by exactly `\n\n` — so applying it to the
+ * finalized `responseParts.join(PARAGRAPH_SEP)` leaves well-formed responses
+ * byte-identical, while the streaming accumulator (which sees whatever raw
+ * newlines the model emits token-by-token) is held to the same paragraph shape
+ * the finalized render will use. That keeps mid-stream from showing an extra
+ * blank line the finalized message doesn't.
+ */
+export function normalizeParagraphs(text: string): string {
+    return text.replace(/\n{3,}/g, PARAGRAPH_SEP);
+}
+
 /** Pull the final assistant text out of an `eventual_response` data payload. */
 function extractFinalText(response: unknown): string | null {
     if (!response || typeof response !== 'object') return null;
     const r = response as { responseParts?: unknown };
     if (Array.isArray(r.responseParts)) {
-        return r.responseParts.filter((p): p is string => typeof p === 'string').join('\n\n');
+        return normalizeParagraphs(r.responseParts.filter((p): p is string => typeof p === 'string').join(PARAGRAPH_SEP));
     }
     return null;
 }
@@ -283,8 +304,9 @@ const nextToolId = (): string => `tool-${++toolSeq}`;
 function growTextBlock(blocks: MessageBlock[], text: string): void {
     if (!text) return;
     const last = blocks[blocks.length - 1];
-    if (last && last.kind === 'text') last.text += text;
-    else blocks.push({ kind: 'text', text });
+    // Same paragraph normalization as the plain-text stream path (SMOODEV-2534).
+    if (last && last.kind === 'text') last.text = normalizeParagraphs(last.text + text);
+    else blocks.push({ kind: 'text', text: normalizeParagraphs(text) });
 }
 
 /**
@@ -786,7 +808,11 @@ export class ConversationController {
                 if (event.type === 'stream_token') {
                     const token = event.token ?? event.data?.token ?? '';
                     if (token) {
-                        assistant.text += token;
+                        // Hold the streamed text to the same paragraph shape the finalized
+                        // render uses (PARAGRAPH_SEP) so no transient extra blank line
+                        // flickers mid-stream then vanishes on finalize (SMOODEV-2534).
+                        // ponytail: O(n) re-scan per token; fine for chat-length replies.
+                        assistant.text = normalizeParagraphs(assistant.text + token);
                         // Grow the trailing text block so prose interleaves with any
                         // tool chips in the order the model produced them.
                         if (showTools && assistant.blocks) growTextBlock(assistant.blocks, token);
