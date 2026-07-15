@@ -337,6 +337,14 @@ ${
 .bubble.typing i:nth-child(2) { animation-delay: .18s; }
 .bubble.typing i:nth-child(3) { animation-delay: .36s; }
 @keyframes sac-typing { 0%, 60%, 100% { transform: translateY(0); opacity: .4 } 30% { transform: translateY(-5px); opacity: 1 } }
+/* Fast-model preamble ("what I'm about to do") shown in place of the typing dots
+   until the real answer streams. Muted + italic so it reads as a transient status,
+   not the answer. */
+.bubble.preamble {
+    font-style: italic;
+    opacity: .72;
+    color: color-mix(in srgb, var(--sac-assistant-bubble-text) 75%, transparent);
+}
 
 .cursor::after {
     content: '';

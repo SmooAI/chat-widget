@@ -1167,9 +1167,17 @@ export class SmoothAgentChatElement extends HTMLElement {
             const bubble = document.createElement('div');
             bubble.className = `bubble ${msg.role}`;
             if (msg.role === 'assistant' && msg.streaming && !msg.text) {
-                // No text yet → animated typing indicator.
-                bubble.classList.add('typing');
-                bubble.append(this.typingDot(), this.typingDot(), this.typingDot());
+                if (msg.preamble) {
+                    // Fast-model preamble covering the main model's time-to-first-
+                    // token: show the "what I'm about to do" sentence (plain text)
+                    // instead of bare dots. Replaced by the answer once it streams.
+                    bubble.classList.add('preamble');
+                    bubble.textContent = msg.preamble;
+                } else {
+                    // No text or preamble yet → animated typing indicator.
+                    bubble.classList.add('typing');
+                    bubble.append(this.typingDot(), this.typingDot(), this.typingDot());
+                }
             } else if (msg.streaming) {
                 // Mid-stream: partial/unclosed markdown renders ugly (half-open
                 // `**`, dangling `[`), so keep plain text + the blinking cursor.
