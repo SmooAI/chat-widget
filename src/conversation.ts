@@ -95,6 +95,14 @@ export interface ChatMessage {
     /** True while an assistant message is still streaming. */
     streaming: boolean;
     /**
+     * Ephemeral "what I'm about to do" sentence from the fast-model preamble
+     * (`stream_preamble`), shown in the typing slot while `text` is still empty
+     * to cover the main model's time-to-first-token. Cleared the moment the real
+     * answer starts streaming (first `stream_token`). Absent unless the server
+     * emits a preamble (`SMOOTH_AGENT_PREAMBLE_MODEL`).
+     */
+    preamble?: string;
+    /**
      * Ordered text + tool segments, interleaved as the model produced them. Present
      * only on assistant messages when `showToolActivity` is enabled (absent
      * otherwise — the default popover renders `text` alone, byte-for-byte unchanged).
@@ -808,6 +816,8 @@ export class ConversationController {
                 if (event.type === 'stream_token') {
                     const token = event.token ?? event.data?.token ?? '';
                     if (token) {
+                        // The real answer has begun — retire the ephemeral preamble.
+                        if (assistant.preamble) assistant.preamble = undefined;
                         // Hold the streamed text to the same paragraph shape the finalized
                         // render uses (PARAGRAPH_SEP) so no transient extra blank line
                         // flickers mid-stream then vanishes on finalize (SMOODEV-2534).
@@ -816,6 +826,18 @@ export class ConversationController {
                         // Grow the trailing text block so prose interleaves with any
                         // tool chips in the order the model produced them.
                         if (showTools && assistant.blocks) growTextBlock(assistant.blocks, token);
+                        this.emitMessages();
+                    }
+                } else if ((event as { type?: string }).type === 'stream_preamble') {
+                    // Fast-model preamble: show it in the typing slot ONLY while no
+                    // answer text has arrived yet (a late frame after the answer
+                    // started is ignored — the server also guards this). Cast because
+                    // the pinned SDK's union may predate `stream_preamble` (added in
+                    // @smooai/smooth-operator 1.22.15); shape mirrors stream_token.
+                    const pre = event as { token?: string; data?: { token?: string } };
+                    const token = pre.token ?? pre.data?.token ?? '';
+                    if (token && !assistant.text) {
+                        assistant.preamble = (assistant.preamble ?? '') + token;
                         this.emitMessages();
                     }
                 } else if (showTools && event.type === 'stream_chunk') {

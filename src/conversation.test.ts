@@ -907,3 +907,71 @@ describe('ConversationController — Rich Interactions (identity_intake card)', 
     });
 });
 
+
+describe('ConversationController — fast-model preamble (stream_preamble)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    it('shows the preamble in the typing slot, then the answer replaces it', async () => {
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'create_conversation_session') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: { sessionId: 'sess-new', conversationId: 'conv-1', agentId: frame.agentId } });
+            } else if (frame.action === 'send_message') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                // Preamble arrives BEFORE any answer token (the whole point).
+                reply({ type: 'stream_preamble', requestId, token: 'Let me check that.', data: { requestId, token: 'Let me check that.' } });
+                reply({ type: 'stream_token', requestId, token: 'Hi' });
+                reply({ type: 'eventual_response', requestId, status: 200, data: { requestId, status: 200, data: { messageId: 'm1', response: { responseParts: ['Hi there'] } } } });
+            }
+        };
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+        await tick();
+
+        type Snap = Array<{ role: string; text: string; preamble?: string }>;
+        const snaps = onMessages.mock.calls.map((c) => c[0] as Snap);
+
+        // At some point the assistant bubble carried the preamble with NO answer text yet.
+        const showedPreamble = snaps.some((s) => {
+            const a = s.find((m) => m.role === 'assistant');
+            return a?.preamble === 'Let me check that.' && a.text === '';
+        });
+        expect(showedPreamble).toBe(true);
+
+        // The final assistant message is the real answer, and the preamble is gone.
+        const finalAssistant = snaps.at(-1)!.find((m) => m.role === 'assistant')!;
+        expect(finalAssistant.text).toBe('Hi there');
+        expect(finalAssistant.preamble).toBeUndefined();
+    });
+
+    it('ignores a preamble frame that arrives after the answer already started', async () => {
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'create_conversation_session') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: { sessionId: 'sess-new', conversationId: 'conv-1', agentId: frame.agentId } });
+            } else if (frame.action === 'send_message') {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                reply({ type: 'stream_token', requestId, token: 'Answer' });
+                // A late preamble must NOT clobber the in-flight answer.
+                reply({ type: 'stream_preamble', requestId, token: 'too late', data: { requestId, token: 'too late' } });
+                reply({ type: 'eventual_response', requestId, status: 200, data: { requestId, status: 200, data: { messageId: 'm1', response: { responseParts: ['Answer'] } } } });
+            }
+        };
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+        await tick();
+
+        type Snap = Array<{ role: string; text: string; preamble?: string }>;
+        const snaps = onMessages.mock.calls.map((c) => c[0] as Snap);
+        const anyPreamble = snaps.some((s) => s.find((m) => m.role === 'assistant')?.preamble);
+        expect(anyPreamble).toBeFalsy();
+    });
+});
