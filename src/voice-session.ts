@@ -105,6 +105,7 @@ export interface VoiceSessionSeams {
 export interface PlayerAudioContext {
     readonly currentTime: number;
     readonly destination: unknown;
+    readonly sampleRate: number;
     createBuffer(channels: number, length: number, sampleRate: number): { getChannelData(channel: number): Float32Array };
     createBufferSource(): {
         buffer: unknown;
@@ -116,29 +117,119 @@ export interface PlayerAudioContext {
     close?(): Promise<void>;
 }
 
+/** Half-width of the {@link StreamUpsampler} sinc kernel, in input samples. */
+export const SINC_HALF_TAPS = 12;
+
+/** Hann-windowed normalized sinc over ±{@link SINC_HALF_TAPS} input samples. */
+function sincWin(v: number): number {
+    if (v === 0) return 1;
+    const pv = Math.PI * v;
+    return (Math.sin(pv) / pv) * (0.5 + 0.5 * Math.cos(pv / SINC_HALF_TAPS));
+}
+
+/**
+ * Streaming band-limited upsampler `inRate` → `outRate` (windowed-sinc
+ * interpolation). Filter history and fractional phase carry across chunks, so
+ * a stream split at arbitrary chunk boundaries resamples identically to the
+ * unsplit stream — no boundary clicks.
+ *
+ * Exists because playing 16 kHz buffers through a forced-16 kHz AudioContext
+ * leaves the 16k→hardware-rate conversion to the browser's output resampler,
+ * and cheap interpolation there mirrors speech energy above 8 kHz — audible as
+ * harsh static riding the agent's voice (SMOODEV-2668).
+ */
+export class StreamUpsampler {
+    /** Input samples advanced per output sample (< 1 when upsampling). */
+    private readonly step: number;
+    private tail = new Float32Array(2 * SINC_HALF_TAPS);
+    private phase = 0;
+
+    constructor(inRate: number, outRate: number) {
+        this.step = inRate / outRate;
+    }
+
+    /** Resample one chunk; returns output samples ready to schedule. */
+    process(input: Float32Array): Float32Array {
+        const x = new Float32Array(this.tail.length + input.length);
+        x.set(this.tail);
+        x.set(input, this.tail.length);
+        const maxT = x.length - SINC_HALF_TAPS;
+        const outLen = Math.max(0, Math.ceil((maxT - SINC_HALF_TAPS - this.phase) / this.step));
+        const out = new Float32Array(outLen);
+        let t = this.phase + SINC_HALF_TAPS;
+        for (let o = 0; o < outLen; o++) {
+            const i0 = Math.floor(t);
+            const frac = t - i0;
+            let acc = 0;
+            // ponytail: per-sample sinc eval (~24 sin() per output sample);
+            // precompute a phase table if profiling ever cares.
+            for (let k = 1 - SINC_HALF_TAPS; k <= SINC_HALF_TAPS; k++) {
+                acc += x[i0 + k]! * sincWin(k - frac);
+            }
+            out[o] = acc;
+            t += this.step;
+        }
+        this.phase = t - maxT;
+        this.tail = x.slice(x.length - 2 * SINC_HALF_TAPS);
+        return out;
+    }
+}
+
+/**
+ * Seconds of audio pre-buffered when scheduling against a drained queue. A
+ * chunk that arrives just-in-time otherwise starts exactly at the playhead and
+ * the next network hiccup opens an audible gap (click).
+ */
+export const PLAYBACK_PRIME_S = 0.1;
+
 /**
  * Gapless PCM playback: each incoming linear16 chunk becomes an AudioBuffer
  * scheduled back-to-back (`nextTime`) so consecutive chunks butt together with
  * no gaps. `flush()` stops every scheduled source (barge-in / mic-button stop).
+ *
+ * The wire is one continuous 16 kHz linear16 byte stream — frames may split
+ * mid-sample, so a dangling byte is carried into the next frame (an odd-length
+ * `Int16Array` view would throw and every later frame would decode one byte
+ * off: pure noise). Chunks are resampled to the context's native rate via
+ * {@link StreamUpsampler} rather than trusting the browser's output resampler.
  */
 export class PcmPlayer implements VoicePlayer {
     private nextTime = 0;
+    private pendingByte: number | null = null;
+    private resampler: StreamUpsampler | null;
     private readonly live = new Set<ReturnType<PlayerAudioContext['createBufferSource']>>();
 
-    constructor(private readonly ctx: PlayerAudioContext) {}
+    constructor(private readonly ctx: PlayerAudioContext) {
+        this.resampler = ctx.sampleRate !== VOICE_SAMPLE_RATE ? new StreamUpsampler(VOICE_SAMPLE_RATE, ctx.sampleRate) : null;
+    }
 
     enqueue(chunk: ArrayBuffer): void {
-        const int16 = new Int16Array(chunk);
-        if (int16.length === 0) return;
-        const buf = this.ctx.createBuffer(1, int16.length, VOICE_SAMPLE_RATE);
-        const ch = buf.getChannelData(0);
-        for (let i = 0; i < int16.length; i++) ch[i] = int16[i]! / 32768;
+        // Re-align to sample boundaries across frames.
+        let bytes = new Uint8Array(chunk);
+        if (this.pendingByte !== null) {
+            const joined = new Uint8Array(bytes.length + 1);
+            joined[0] = this.pendingByte;
+            joined.set(bytes, 1);
+            this.pendingByte = null;
+            bytes = joined;
+        }
+        const evenLen = bytes.length & ~1;
+        if (evenLen < bytes.length) this.pendingByte = bytes[bytes.length - 1]!;
+        if (evenLen === 0) return;
+        const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, evenLen / 2);
+        let samples: Float32Array = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) samples[i] = int16[i]! / 32768;
+        if (this.resampler) samples = this.resampler.process(samples);
+        if (samples.length === 0) return;
+        const buf = this.ctx.createBuffer(1, samples.length, this.ctx.sampleRate);
+        buf.getChannelData(0).set(samples);
         const src = this.ctx.createBufferSource();
         src.buffer = buf;
         src.connect(this.ctx.destination);
-        const start = Math.max(this.ctx.currentTime, this.nextTime);
+        const now = this.ctx.currentTime;
+        const start = this.nextTime > now ? this.nextTime : now + PLAYBACK_PRIME_S;
         src.start(start);
-        this.nextTime = start + int16.length / VOICE_SAMPLE_RATE;
+        this.nextTime = start + samples.length / this.ctx.sampleRate;
         this.live.add(src);
         src.onended = () => this.live.delete(src);
     }
@@ -153,6 +244,8 @@ export class PcmPlayer implements VoicePlayer {
         }
         this.live.clear();
         this.nextTime = 0;
+        this.pendingByte = null;
+        if (this.resampler) this.resampler = new StreamUpsampler(VOICE_SAMPLE_RATE, this.ctx.sampleRate);
     }
 
     close(): void {
@@ -219,7 +312,15 @@ const defaultStartCapture: StartCapture = async (onFrame) => {
 const defaultCreatePlayer = (): VoicePlayer => {
     const Ctx = (globalThis as { AudioContext?: new (opts?: { sampleRate?: number }) => AudioContext }).AudioContext;
     if (!Ctx) throw new Error('AudioContext is not available');
-    return new PcmPlayer(new Ctx({ sampleRate: VOICE_SAMPLE_RATE }) as unknown as PlayerAudioContext);
+    // Native device rate — PcmPlayer upsamples 16 kHz → hardware itself
+    // (SMOODEV-2668). A sub-16 kHz device rate (exotic) would need a
+    // band-limiting DOWNsampler instead; force a 16 kHz context there.
+    let ctx = new Ctx();
+    if (ctx.sampleRate < VOICE_SAMPLE_RATE) {
+        void ctx.close();
+        ctx = new Ctx({ sampleRate: VOICE_SAMPLE_RATE });
+    }
+    return new PcmPlayer(ctx as unknown as PlayerAudioContext);
 };
 
 // ────────────────────────────── VoiceSession ────────────────────────────────

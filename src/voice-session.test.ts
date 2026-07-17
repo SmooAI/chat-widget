@@ -16,8 +16,10 @@ import { describe, expect, it } from 'vitest';
 import {
     downsampleTo16k,
     PcmPlayer,
+    PLAYBACK_PRIME_S,
     type PlayerAudioContext,
     rmsLevel,
+    StreamUpsampler,
     VOICE_SAMPLE_RATE,
     type VoicePlayer,
     VoiceSession,
@@ -364,17 +366,29 @@ interface ScheduledSource {
     length: number;
 }
 
-/** Fake 16 kHz AudioContext capturing scheduling for assertions. */
-function makeFakeCtx(): { ctx: PlayerAudioContext; scheduled: ScheduledSource[]; setTime: (t: number) => void; closed: () => boolean } {
+/** Fake AudioContext capturing scheduling + written samples for assertions. */
+function makeFakeCtx(sampleRate = 16000): {
+    ctx: PlayerAudioContext;
+    scheduled: ScheduledSource[];
+    buffers: Float32Array[];
+    setTime: (t: number) => void;
+    closed: () => boolean;
+} {
     let now = 0;
     let closed = false;
     const scheduled: ScheduledSource[] = [];
+    const buffers: Float32Array[] = [];
     const ctx: PlayerAudioContext = {
         get currentTime() {
             return now;
         },
         destination: {},
-        createBuffer: (_ch, length) => ({ getChannelData: () => new Float32Array(length) }),
+        sampleRate,
+        createBuffer: (_ch, length) => {
+            const data = new Float32Array(length);
+            buffers.push(data);
+            return { getChannelData: () => data };
+        },
         createBufferSource: () => {
             const rec: ScheduledSource = { startedAt: undefined, stopped: false, length: 0 };
             scheduled.push(rec);
@@ -395,31 +409,31 @@ function makeFakeCtx(): { ctx: PlayerAudioContext; scheduled: ScheduledSource[];
             return Promise.resolve();
         },
     };
-    return { ctx, scheduled, setTime: (t) => (now = t), closed: () => closed };
+    return { ctx, scheduled, buffers, setTime: (t) => (now = t), closed: () => closed };
 }
 
 describe('PcmPlayer', () => {
     const chunk = (samples: number): ArrayBuffer => new Int16Array(samples).buffer as ArrayBuffer;
 
-    it('schedules consecutive chunks back-to-back (gapless)', () => {
+    it('schedules consecutive chunks back-to-back (gapless), primed off the playhead', () => {
         const { ctx, scheduled } = makeFakeCtx();
         const player = new PcmPlayer(ctx);
         player.enqueue(chunk(1600)); // 100 ms
         player.enqueue(chunk(800)); // 50 ms
         player.enqueue(chunk(1600));
         const starts = scheduled.map((s) => s.startedAt!);
-        expect(starts[0]).toBe(0);
-        expect(starts[1]).toBeCloseTo(0.1, 10);
-        expect(starts[2]).toBeCloseTo(0.15, 10);
+        expect(starts[0]).toBe(PLAYBACK_PRIME_S);
+        expect(starts[1]).toBeCloseTo(PLAYBACK_PRIME_S + 0.1, 10);
+        expect(starts[2]).toBeCloseTo(PLAYBACK_PRIME_S + 0.15, 10);
     });
 
-    it('re-anchors to currentTime after the queue drains (no scheduling in the past)', () => {
+    it('re-anchors (primed) after the queue drains — no scheduling in the past', () => {
         const { ctx, scheduled, setTime } = makeFakeCtx();
         const player = new PcmPlayer(ctx);
-        player.enqueue(chunk(1600)); // plays 0 → 0.1
+        player.enqueue(chunk(1600)); // plays PRIME → PRIME+0.1
         setTime(0.5); // long silence; next reply arrives later
         player.enqueue(chunk(1600));
-        expect(scheduled[1]!.startedAt).toBe(0.5);
+        expect(scheduled[1]!.startedAt).toBeCloseTo(0.5 + PLAYBACK_PRIME_S, 10);
     });
 
     it('flush() stops every live source and resets the schedule', () => {
@@ -432,7 +446,65 @@ describe('PcmPlayer', () => {
         // After a flush the next chunk anchors to now, not the stale nextTime.
         setTime(0.05);
         player.enqueue(chunk(1600));
-        expect(scheduled[2]!.startedAt).toBe(0.05);
+        expect(scheduled[2]!.startedAt).toBeCloseTo(0.05 + PLAYBACK_PRIME_S, 10);
+    });
+
+    it('reassembles samples split mid-sample across frames (odd-length chunks)', () => {
+        // The wire is one continuous byte stream; a frame boundary can land in
+        // the middle of an int16. Split [100, -200, 300, 400] as 3+5 bytes.
+        const { ctx, buffers } = makeFakeCtx();
+        const player = new PcmPlayer(ctx);
+        const stream = new Uint8Array(new Int16Array([100, -200, 300, 400]).buffer);
+        player.enqueue(stream.slice(0, 3).buffer as ArrayBuffer);
+        player.enqueue(stream.slice(3).buffer as ArrayBuffer);
+        const played = buffers.flatMap((b) => Array.from(b));
+        expect(played).toEqual([100 / 32768, -200 / 32768, 300 / 32768, 400 / 32768]);
+    });
+
+    it('upsamples to a non-16k context rate and advances the schedule in output time', () => {
+        const { ctx, scheduled, buffers } = makeFakeCtx(48000);
+        const player = new PcmPlayer(ctx);
+        player.enqueue(chunk(1600)); // 100 ms of input
+        const outLen = buffers[0]!.length;
+        // ~3× the input samples (minus the sinc kernel's startup history).
+        expect(outLen).toBeGreaterThan(4600);
+        expect(outLen).toBeLessThanOrEqual(4800);
+        expect(scheduled[0]!.startedAt).toBe(PLAYBACK_PRIME_S);
+        // nextTime advanced by outLen/48000: the follow-up chunk butts against it.
+        player.enqueue(chunk(1600));
+        expect(scheduled[1]!.startedAt).toBeCloseTo(PLAYBACK_PRIME_S + outLen / 48000, 10);
+    });
+
+    it('upsampler output is identical whether the stream is split or not (no boundary artifacts)', () => {
+        // 440 Hz tone at 16 kHz, processed whole vs. split at awkward points —
+        // the carried filter state must make the outputs bit-identical.
+        const input = new Float32Array(1600);
+        for (let i = 0; i < input.length; i++) input[i] = Math.sin((2 * Math.PI * 440 * i) / VOICE_SAMPLE_RATE);
+        const whole = new StreamUpsampler(VOICE_SAMPLE_RATE, 48000).process(input);
+        const split = new StreamUpsampler(VOICE_SAMPLE_RATE, 48000);
+        const parts = [input.slice(0, 7), input.slice(7, 700), input.slice(700, 701), input.slice(701)].map((p) => split.process(p));
+        const joined = parts.flatMap((p) => Array.from(p));
+        expect(joined.length).toBe(whole.length);
+        for (let i = 0; i < whole.length; i++) {
+            expect(Math.abs(joined[i]! - whole[i]!)).toBeLessThan(1e-9);
+        }
+    });
+
+    it('upsampler reproduces an in-band tone faithfully (no imaging energy)', () => {
+        // A 1 kHz tone upsampled 16k → 48k should still be a clean 1 kHz tone:
+        // compare against the analytically expected samples (skip the kernel
+        // warm-up at the head).
+        const input = new Float32Array(3200);
+        for (let i = 0; i < input.length; i++) input[i] = Math.sin((2 * Math.PI * 1000 * i) / VOICE_SAMPLE_RATE);
+        const up = new StreamUpsampler(VOICE_SAMPLE_RATE, 48000);
+        const out = up.process(input);
+        const delaySamples = 2 * 12; // tail history delay at 48k = SINC_HALF_TAPS input samples… asserted below by best fit
+        let maxErr = 0;
+        for (let i = 500; i < out.length - 500; i++) {
+            const expected = Math.sin((2 * Math.PI * 1000 * (i - delaySamples * 1.5)) / 48000);
+            maxErr = Math.max(maxErr, Math.abs(out[i]! - expected));
+        }
+        expect(maxErr).toBeLessThan(0.01);
     });
 
     it('close() flushes and closes the context; empty chunks are ignored', () => {
