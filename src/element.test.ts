@@ -327,6 +327,26 @@ describe('mid-conversation suggested-reply chips', () => {
         expect(chips[1]?.textContent).toBe('See pricing');
     });
 
+    it('renders chips inline in the message flow, directly after the last bubble (SMOODEV-2668)', () => {
+        const { sr, api } = mountAnon();
+        api.messages = [user('u1', 'hi'), finalized('a1', 'Hello!', ['Book a demo'])];
+        api.renderMessages();
+        const messages = sr.querySelector('.messages')!;
+        const strip = messages.querySelector(':scope > .reply-suggestions');
+        expect(strip).not.toBeNull();
+        // The strip is the LAST child of the message flow — right under the reply.
+        expect(messages.lastElementChild).toBe(strip);
+    });
+
+    it('tapping a chip removes the strip immediately (before any new turn renders)', () => {
+        const { sr, api } = mountAnon();
+        api.controller = { send: () => {}, disconnect: () => {} };
+        api.messages = [user('u1', 'hi'), finalized('a1', 'Hello!', ['Book a demo'])];
+        api.renderMessages();
+        (sr.querySelector('.reply-suggestions .chip') as HTMLButtonElement).click();
+        expect(sr.querySelectorAll('.reply-suggestions .chip').length).toBe(0);
+    });
+
     it('only shows suggestions for the LATEST message (not an earlier assistant turn)', () => {
         const { sr, api } = mountAnon();
         // Assistant turn with suggestions is followed by a newer user message.
