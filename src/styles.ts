@@ -697,8 +697,6 @@ ${
 }
 
 /* ───────────── Mid-conversation suggested-reply chips ─────────────── */
-.reply-suggestions { padding: 0 14px 4px; }
-.reply-suggestions:empty { display: none; }
 
 /* ─────────────── OTP / tool-confirmation interrupt ────────────────── */
 .interrupt { padding: 0 14px; }

@@ -294,7 +294,6 @@ export class SmoothAgentChatElement extends HTMLElement {
     private inputEl: HTMLTextAreaElement | null = null;
     private sendBtn: HTMLButtonElement | null = null;
     private micBtn: HTMLButtonElement | null = null;
-    private suggestionsEl: HTMLElement | null = null;
 
     // ── Smooth streaming reveal ──
     // Tokens arrive in variable-size bursts at uneven rates, so revealing text in
@@ -544,7 +543,6 @@ export class SmoothAgentChatElement extends HTMLElement {
             : '';
         const chatHtml = `
                 <div class="messages"></div>
-                <div class="reply-suggestions"></div>
                 <div class="interrupt hidden"></div>
                 <div class="composer-wrap">
                     <div class="composer">
@@ -586,7 +584,6 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.sendBtn = container.querySelector('.send');
         this.micBtn = container.querySelector('.mic');
         this.interruptEl = container.querySelector('.interrupt');
-        this.suggestionsEl = container.querySelector('.reply-suggestions');
 
         this.launcherEl?.addEventListener('click', () => this.openChat());
         container.querySelector('.close')?.addEventListener('click', () => this.closeChat());
@@ -1204,23 +1201,27 @@ export class SmoothAgentChatElement extends HTMLElement {
                 this.messagesEl.appendChild(this.renderSources(msg.citations));
             }
         }
-        this.scrollToBottom(true);
         this.renderSuggestions();
+        this.scrollToBottom(true);
     }
 
     /**
-     * Render (or clear) the mid-conversation suggested-reply chips under the
-     * composer. Shown ONLY when: the feature is enabled, no interrupt / restore
-     * overlay is active (those reuse the slot above the composer), and the LATEST
-     * message is a finalized assistant turn that carried suggestions. A new turn
-     * (agent or the visitor typing) appends messages, so the latest is no longer
-     * that assistant message and the chips clear on the next render. Chips reuse
-     * the empty-state `.prompts`/`.chip` styling and send via the same path.
+     * Render the mid-conversation suggested-reply chips INLINE in the message
+     * flow, directly under the latest bubble (SMOODEV-2668 — they used to live
+     * in a fixed slot above the composer, visually detached from the reply).
+     * Shown ONLY when: the feature is enabled, no interrupt / restore overlay is
+     * active, and the LATEST message is a finalized assistant turn that carried
+     * suggestions. Chips are shortcuts, never a gate — the composer stays live.
+     * Picking one removes the strip immediately; any new turn rebuilds the
+     * message list, so stale chips can't linger. Chips reuse the empty-state
+     * `.prompts`/`.chip` styling and send via the same path.
      */
     private renderSuggestions(): void {
-        const el = this.suggestionsEl;
-        if (!el) return;
-        el.replaceChildren();
+        const host = this.messagesEl;
+        if (!host) return;
+        // Self-clearing: drop any strip from a previous render so a standalone
+        // call (e.g. an interrupt overlay appearing) can only ever hide chips.
+        host.querySelector(':scope > .reply-suggestions')?.remove();
         if (!this.showSuggestedReplies) return;
         // Hidden while an OTP / tool-confirmation / restore overlay is active.
         if (this.interrupt || this.identityRestore.phase !== 'idle') return;
@@ -1228,16 +1229,19 @@ export class SmoothAgentChatElement extends HTMLElement {
         if (!last || last.role !== 'assistant' || last.streaming || !last.suggestions || last.suggestions.length === 0) return;
 
         const chips = document.createElement('div');
-        chips.className = 'prompts';
+        chips.className = 'prompts reply-suggestions';
         for (const suggestion of last.suggestions) {
             const chip = document.createElement('button');
             chip.type = 'button';
             chip.className = 'chip';
             chip.textContent = suggestion;
-            chip.addEventListener('click', () => this.submitPrompt(suggestion));
+            chip.addEventListener('click', () => {
+                chips.remove(); // gone the moment a choice is made
+                this.submitPrompt(suggestion);
+            });
             chips.appendChild(chip);
         }
-        el.appendChild(chips);
+        host.appendChild(chips);
     }
 
     // ─────────────────────── Smooth streaming reveal ───────────────────────────
