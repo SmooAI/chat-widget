@@ -335,6 +335,12 @@ export interface VoiceSessionOptions {
     /** Optional JWT for authenticated contexts (public agents auth by Origin). */
     token?: string;
     /**
+     * Agent speech (SMOODEV-2674). `false` = STT-only: the visitor speaks and
+     * READS the replies — the server skips TTS entirely (no audio frames, no
+     * speaking events) and only streams `reply_text`. Default `true`.
+     */
+    tts?: boolean;
+    /**
      * RMS level (0..1) above which a mic frame counts as speech for barge-in
      * while the agent is speaking. Default 0.02 — comfortably above room noise
      * post-AGC, well below speech.
@@ -392,6 +398,7 @@ export class VoiceSession {
                 const start: Record<string, unknown> = { type: 'start', agent_id: this.opts.agentId };
                 if (this.opts.conversationId) start.conversation_id = this.opts.conversationId;
                 if (this.opts.token) start.token = this.opts.token;
+                if (this.opts.tts === false) start.tts = false;
                 ws.send(JSON.stringify(start));
                 this.state = 'active';
             });

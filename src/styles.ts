@@ -555,8 +555,9 @@ ${
 .send:active { transform: scale(.94); }
 .send:disabled { opacity: .4; cursor: default; transform: none; box-shadow: none; }
 
-/* Voice mic toggle (SMOODEV-2534) — ghost twin of .send; lights up while live. */
-.mic {
+/* Voice mic toggle (SMOODEV-2534) — ghost twin of .send; lights up while live.
+   .speech (SMOODEV-2674) is the agent-speech on/off twin next to it. */
+.mic, .speech {
     width: 38px; height: 38px;
     flex: none;
     border: 1px solid color-mix(in srgb, var(--sac-border) 80%, transparent);
@@ -569,9 +570,10 @@ ${
     color: color-mix(in srgb, var(--sac-text) 65%, transparent);
     transition: transform .2s var(--sac-ease), color .2s ease, background .25s ease, box-shadow .25s ease;
 }
-.mic svg { width: 18px; height: 18px; }
-.mic:hover { color: var(--sac-text); transform: translateY(-1px) scale(1.05); }
-.mic:active { transform: scale(.94); }
+.mic svg, .speech svg { width: 18px; height: 18px; }
+.mic:hover, .speech:hover { color: var(--sac-text); transform: translateY(-1px) scale(1.05); }
+.mic:active, .speech:active { transform: scale(.94); }
+.speech.off { opacity: .55; }
 .mic.active {
     border-color: transparent;
     background: linear-gradient(150deg, var(--sac-primary), var(--sac-primary-2));

@@ -89,6 +89,10 @@ const ICON = {
     tool: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14.7 6.3a3.5 3.5 0 0 0-4.6 4.3l-5 5a1.6 1.6 0 0 0 2.3 2.3l5-5a3.5 3.5 0 0 0 4.3-4.6l-2 2-1.7-.3-.3-1.7 2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
     /** Voice toggle — a microphone. */
     mic: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="3.5" width="6" height="11" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5M9 20.5h6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
+    /** Agent-speech toggle ON — a speaker with waves. */
+    speaker: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 9.5v5h3l4 3.5v-12l-4 3.5H5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M15.5 9.5a4 4 0 0 1 0 5M17.8 7.5a7 7 0 0 1 0 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+    /** Agent-speech toggle OFF — a muted speaker. */
+    speakerOff: `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 9.5v5h3l4 3.5v-12l-4 3.5H5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m15.5 9.5 5 5M20.5 9.5l-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
 } as const;
 
 /**
@@ -281,7 +285,10 @@ export class SmoothAgentChatElement extends HTMLElement {
     /** True while the pre-chat identity gate is showing (blocks premature connect). */
     private gating = false;
     /** Voice config (SMOODEV-2534) — enabled=false renders zero voice UI. */
-    private voiceCfg: { enabled: boolean; url: string } = { enabled: false, url: '' };
+    private voiceCfg: { enabled: boolean; url: string; tts: boolean } = { enabled: false, url: '', tts: true };
+    /** Agent speech on/off (SMOODEV-2674) — applies at the next voice session start. */
+    private voiceTtsOn = true;
+    private speechBtn: HTMLButtonElement | null = null;
     /** Live voice session, or null when voice is off. */
     private voiceSession: VoiceSession | null = null;
 
@@ -538,8 +545,9 @@ export class SmoothAgentChatElement extends HTMLElement {
         const footerHtml = footerInner ? `<div class="footer">${footerInner}</div>` : '';
         // Voice (SMOODEV-2534): mic toggle in the composer, only when enabled.
         this.voiceCfg = resolved.voice;
+        this.voiceTtsOn = resolved.voice.tts;
         const micHtml = resolved.voice.enabled
-            ? `<button class="mic" type="button" aria-label="Start voice" aria-pressed="false" title="Talk to ${escapeHtml(resolved.agentName)}">${ICON.mic}</button>`
+            ? `<button class="speech${this.voiceTtsOn ? '' : ' off'}" type="button" aria-label="Agent voice" aria-pressed="${this.voiceTtsOn}" title="${this.voiceTtsOn ? 'Agent speaks replies — click for speak-and-read (no agent audio)' : 'Agent voice off — replies are text only. Click to hear the agent'}">${this.voiceTtsOn ? ICON.speaker : ICON.speakerOff}</button><button class="mic" type="button" aria-label="Start voice" aria-pressed="false" title="Talk to ${escapeHtml(resolved.agentName)}">${ICON.mic}</button>`
             : '';
         const chatHtml = `
                 <div class="messages"></div>
@@ -583,12 +591,14 @@ export class SmoothAgentChatElement extends HTMLElement {
         this.inputEl = container.querySelector('textarea');
         this.sendBtn = container.querySelector('.send');
         this.micBtn = container.querySelector('.mic');
+        this.speechBtn = container.querySelector('.speech');
         this.interruptEl = container.querySelector('.interrupt');
 
         this.launcherEl?.addEventListener('click', () => this.openChat());
         container.querySelector('.close')?.addEventListener('click', () => this.closeChat());
         this.sendBtn?.addEventListener('click', () => this.submit());
         this.micBtn?.addEventListener('click', () => this.toggleVoice());
+        this.speechBtn?.addEventListener('click', () => this.toggleAgentSpeech());
         this.inputEl?.addEventListener('input', () => this.autosize());
         this.inputEl?.addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter' && !ev.shiftKey) {
@@ -1573,18 +1583,44 @@ export class SmoothAgentChatElement extends HTMLElement {
         void this.startVoice();
     }
 
+    /**
+     * Flip agent speech on/off (SMOODEV-2674). Session-scoped: the choice is
+     * sent in the voice start frame (`tts:false` = STT-only, the server skips
+     * TTS entirely), so flipping mid-session takes effect on the NEXT session —
+     * the titles say so. Mid-session, turning speech off also cuts any audio
+     * that is currently playing.
+     */
+    private toggleAgentSpeech(): void {
+        this.voiceTtsOn = !this.voiceTtsOn;
+        if (!this.voiceTtsOn && this.voiceSession?.isSpeaking) this.voiceSession.interrupt();
+        const btn = this.speechBtn;
+        if (!btn) return;
+        btn.classList.toggle('off', !this.voiceTtsOn);
+        btn.setAttribute('aria-pressed', String(this.voiceTtsOn));
+        btn.title = this.voiceTtsOn
+            ? 'Agent speaks replies — click for speak-and-read (no agent audio)'
+            : this.voiceSession
+              ? 'Agent voice off for the next session — replies stay text only'
+              : 'Agent voice off — replies are text only. Click to hear the agent';
+        btn.innerHTML = this.voiceTtsOn ? ICON.speaker : ICON.speakerOff; // static, trusted
+    }
+
     private async startVoice(): Promise<void> {
         if (!this.controller || this.voiceSession || !this.voiceCfg.enabled) return;
         const config = this.readConfig();
         if (!config) return;
-        // Best-effort: join the text thread when one exists. If the text session
-        // hasn't connected yet, voice starts a fresh thread (the frozen protocol
-        // never returns the voice-created conversation id, so it can't be adopted
-        // for later text turns — tracked as a follow-up on the server protocol).
+        // Voice and text share ONE conversation. If the text session hasn't
+        // connected yet (voice-first visitor), connect it now — voice turns then
+        // land in a REAL conversation the text thread already owns, so leaving
+        // voice continues seamlessly in text (SMOODEV-2674). connect() is
+        // idempotent; on failure voice still starts (server mints a thread).
+        if (!this.controller.currentConversationId) {
+            await this.controller.connect().catch(() => {});
+        }
         const conversationId = this.controller.currentConversationId ?? undefined;
         const controller = this.controller;
         const session = new VoiceSession(
-            { url: this.voiceCfg.url, agentId: config.agentId, conversationId },
+            { url: this.voiceCfg.url, agentId: config.agentId, conversationId, tts: this.voiceTtsOn },
             {
                 onTranscriptPartial: (text) => {
                     // Live partial transcript in the input area while listening.
