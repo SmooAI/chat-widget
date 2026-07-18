@@ -554,17 +554,79 @@ describe('voice config gating (SMOODEV-2534)', () => {
             disconnect: () => {},
         };
         await priv.startVoice();
-        const session = priv.voiceSession as unknown as { opts: { url?: string; agentId: string; conversationId?: string } } | null;
+        const session = priv.voiceSession as unknown as { opts: { url?: string; agentId: string; conversationId?: string; tts?: boolean } } | null;
         expect(session).not.toBeNull();
         expect(session!.opts.url).toBe('wss://voice.test/ws');
         expect(session!.opts.agentId).toBe('a1');
         // The text thread's conversation id rides along so voice resumes it.
         expect(session!.opts.conversationId).toBe('conv-42');
+        // Agent speech defaults ON.
+        expect(session!.opts.tts).toBe(true);
         const mic = sr.querySelector('.composer .mic') as HTMLButtonElement;
         expect(mic.classList.contains('active')).toBe(true);
         expect(mic.getAttribute('aria-pressed')).toBe('true');
         expect(mic.getAttribute('aria-label')).toBe('Stop voice');
     }
+
+    it('renders the agent-speech toggle; flipping it starts STT-only sessions (SMOODEV-2674)', async () => {
+        const origStart = VoiceSession.prototype.start;
+        VoiceSession.prototype.start = () => Promise.resolve();
+        try {
+            const el = mountCfg({ voice: { enabled: true, url: 'wss://voice.test/ws' } });
+            const sr = el.shadowRoot!;
+            const speech = sr.querySelector('.composer .speech') as HTMLButtonElement;
+            expect(speech).not.toBeNull();
+            expect(speech.getAttribute('aria-pressed')).toBe('true'); // speaks by default
+            speech.click();
+            expect(speech.getAttribute('aria-pressed')).toBe('false');
+            expect(speech.classList.contains('off')).toBe(true);
+            const priv = el as unknown as { startVoice: () => Promise<void>; voiceSession: { opts: { tts?: boolean } } | null; controller: unknown };
+            priv.controller = { currentConversationId: 'conv-42', appendLocalMessage: () => {}, connect: () => Promise.resolve(), disconnect: () => {} };
+            await priv.startVoice();
+            expect(priv.voiceSession!.opts.tts).toBe(false);
+        } finally {
+            VoiceSession.prototype.start = origStart;
+        }
+    });
+
+    it('voice.tts:false config starts sessions STT-only by default', () => {
+        const sr = mountCfg({ voice: { enabled: true, tts: false } }).shadowRoot!;
+        const speech = sr.querySelector('.composer .speech') as HTMLButtonElement;
+        expect(speech.getAttribute('aria-pressed')).toBe('false');
+        expect(speech.classList.contains('off')).toBe(true);
+    });
+
+    it('voice-first: startVoice connects the text session so voice joins a real thread (SMOODEV-2674)', async () => {
+        const origStart = VoiceSession.prototype.start;
+        VoiceSession.prototype.start = () => Promise.resolve();
+        try {
+            const el = mountCfg({ voice: { enabled: true, url: 'wss://voice.test/ws' } });
+            const priv = el as unknown as {
+                startVoice: () => Promise<void>;
+                voiceSession: { opts: { conversationId?: string } } | null;
+                controller: unknown;
+            };
+            // No conversation yet; connect() establishes one (the voice-first path).
+            let connected = false;
+            const stub = {
+                get currentConversationId() {
+                    return connected ? 'conv-fresh' : null;
+                },
+                appendLocalMessage: () => {},
+                connect: () => {
+                    connected = true;
+                    return Promise.resolve();
+                },
+                disconnect: () => {},
+            };
+            priv.controller = stub;
+            await priv.startVoice();
+            expect(connected).toBe(true);
+            expect(priv.voiceSession!.opts.conversationId).toBe('conv-fresh');
+        } finally {
+            VoiceSession.prototype.start = origStart;
+        }
+    });
 });
 
 describe('Rich Interactions card registry', () => {

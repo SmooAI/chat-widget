@@ -94,7 +94,7 @@ class MockPlayer implements VoicePlayer {
 
 /** Build a session wired to mocks. `harness.mic(samples, rate)` injects a mic frame. */
 function makeSession(
-    opts: { conversationId?: string; token?: string; bargeInThreshold?: number } = {},
+    opts: { conversationId?: string; token?: string; bargeInThreshold?: number; tts?: boolean } = {},
     events: VoiceSessionEvents = {},
 ): { session: VoiceSession; ws: MockVoiceSocket; player: MockPlayer; mic: (samples: Float32Array, rate: number) => void; captureStopped: () => boolean } {
     const ws = new MockVoiceSocket();
@@ -146,6 +146,18 @@ describe('VoiceSession protocol framing', () => {
         await session.start();
         ws.open();
         expect(ws.jsonFrames()[0]).toEqual({ type: 'start', agent_id: 'agent-123', conversation_id: 'conv-9', token: 'jwt-abc' });
+    });
+
+    it('sends tts:false in the start frame for STT-only sessions (SMOODEV-2674)', async () => {
+        const { session, ws } = makeSession({ tts: false });
+        await session.start();
+        ws.open();
+        expect(ws.jsonFrames()[0]).toEqual({ type: 'start', agent_id: 'agent-123', tts: false });
+        // Default (tts unset/true) omits the field — frozen-protocol compatible.
+        const { session: s2, ws: ws2 } = makeSession({ tts: true });
+        await s2.start();
+        ws2.open();
+        expect(ws2.jsonFrames()[0]).toEqual({ type: 'start', agent_id: 'agent-123' });
     });
 
     it('streams mic frames as 16 kHz Int16 binary after the start frame', async () => {

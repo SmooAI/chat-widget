@@ -18,6 +18,13 @@ export interface ChatWidgetVoiceConfig {
     enabled?: boolean;
     /** Browser-voice WS endpoint. Defaults to the hosted SmooAI voice service. */
     url?: string;
+    /**
+     * Whether the agent SPEAKS its replies (SMOODEV-2674). `false` starts voice
+     * sessions in STT-only mode: the visitor talks, the replies arrive as text
+     * only. The visitor can flip this per-session with the speaker toggle.
+     * Default `true`.
+     */
+    tts?: boolean;
 }
 
 export interface ChatWidgetTheme {
@@ -175,7 +182,7 @@ export type ResolvedTheme = Required<Omit<ChatWidgetTheme, 'chatBubbleInbound' |
 
 export type ResolvedConfig = Required<Omit<ChatWidgetConfig, 'theme' | 'userName' | 'userEmail' | 'userPhone' | 'authContext' | 'logoUrl' | 'voice'>> & {
     theme: ResolvedTheme;
-    voice: { enabled: boolean; url: string };
+    voice: { enabled: boolean; url: string; tts: boolean };
     userName?: string;
     userEmail?: string;
     userPhone?: string;
@@ -221,7 +228,7 @@ export function resolveConfig(config: ChatWidgetConfig): ResolvedConfig {
         allowChatRestore: config.allowChatRestore ?? true,
         allowAnonymous: config.allowAnonymous ?? false,
         showToolActivity: config.showToolActivity ?? false,
-        voice: { enabled: config.voice?.enabled ?? false, url: config.voice?.url ?? DEFAULT_VOICE_URL },
+        voice: { enabled: config.voice?.enabled ?? false, url: config.voice?.url ?? DEFAULT_VOICE_URL, tts: config.voice?.tts ?? true },
         theme: {
             text: theme.text ?? '#f8fafc',
             background: theme.background ?? '#040d30',
