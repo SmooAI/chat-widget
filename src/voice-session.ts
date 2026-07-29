@@ -346,6 +346,14 @@ export interface VoiceSessionOptions {
      * post-AGC, well below speech.
      */
     bargeInThreshold?: number;
+    /**
+     * Milliseconds of SUSTAINED above-threshold audio required before barge-in
+     * fires. Default 200. Without this, a single 2.67ms mic frame of residual
+     * echo (browser AEC is imperfect on speakers) or a cough interrupts the
+     * agent — which cut off the opening greeting every time. Real speech easily
+     * sustains 200ms; transient blips don't.
+     */
+    bargeInMinMs?: number;
     /** Injectable browser seams (tests). */
     seams?: VoiceSessionSeams;
 }
@@ -370,6 +378,8 @@ export class VoiceSession {
     private player: VoicePlayer | null = null;
     private stopCapture: (() => void) | null = null;
     private speaking = false;
+    /** Sustained above-threshold audio (ms) accumulated toward a barge-in. */
+    private speechRunMs = 0;
     private ended = false;
     state: VoiceSessionState = 'idle';
 
@@ -418,9 +428,19 @@ export class VoiceSession {
     private handleMicFrame(samples: Float32Array, sampleRate: number): void {
         const ws = this.ws;
         if (!ws || ws.readyState !== 1 /* OPEN */ || this.state !== 'active') return;
-        // Barge-in: the visitor speaking over the agent's TTS interrupts it.
-        if (this.speaking && rmsLevel(samples) > (this.opts.bargeInThreshold ?? 0.02)) {
-            this.interrupt();
+        // Barge-in: the visitor speaking over the agent's TTS interrupts it —
+        // but only after SUSTAINED speech, so residual echo/coughs (a few ms)
+        // don't cut off the agent (esp. the opening greeting).
+        if (this.speaking) {
+            if (rmsLevel(samples) > (this.opts.bargeInThreshold ?? 0.02)) {
+                this.speechRunMs += (samples.length / sampleRate) * 1000;
+                if (this.speechRunMs >= (this.opts.bargeInMinMs ?? 200)) {
+                    this.speechRunMs = 0;
+                    this.interrupt();
+                }
+            } else {
+                this.speechRunMs = 0; // gap resets the run — echo/noise is bursty
+            }
         }
         const pcm = downsampleTo16k(samples, sampleRate);
         ws.send(pcm.buffer as ArrayBuffer);
@@ -470,6 +490,7 @@ export class VoiceSession {
     private setSpeaking(speaking: boolean): void {
         if (this.speaking === speaking) return;
         this.speaking = speaking;
+        this.speechRunMs = 0; // fresh barge-in window per agent utterance
         this.events.onSpeaking?.(speaking);
     }
 

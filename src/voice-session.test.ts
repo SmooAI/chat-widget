@@ -275,21 +275,48 @@ describe('VoiceSession server events', () => {
 // ─────────────────────────────── Barge-in ───────────────────────────────────
 
 describe('VoiceSession barge-in', () => {
-    it('speech (RMS above threshold) during agent TTS sends interrupt and flushes playback', async () => {
+    it('SUSTAINED speech (≥200ms above threshold) during agent TTS interrupts and flushes', async () => {
         const speaking: boolean[] = [];
         const { session, ws, player, mic } = makeSession({}, { onSpeaking: (s) => speaking.push(s) });
         await session.start();
         ws.open();
         ws.serverJson({ type: 'speaking_started' });
 
-        mic(sine(440, 48000, 480, 0.5), 48000); // loud speech while agent talks
+        // 21 × 10ms loud frames = 210ms sustained → crosses the 200ms gate.
+        for (let i = 0; i < 21; i++) mic(sine(440, 48000, 480, 0.5), 48000);
         const interrupts = ws.jsonFrames().filter((f) => f.type === 'interrupt');
         expect(interrupts).toHaveLength(1);
         expect(player.flushes).toBe(1);
         expect(speaking).toEqual([true, false]); // barge-in clears speaking locally
 
-        // The mic frame itself still streams (the server transcribes the barge-in).
-        expect(ws.binaryFrames()).toHaveLength(1);
+        // Every mic frame still streams (the server transcribes the barge-in).
+        expect(ws.binaryFrames()).toHaveLength(21);
+    });
+
+    it('a SHORT blip of loud audio (echo/cough) does NOT interrupt the greeting', async () => {
+        const { session, ws, player, mic } = makeSession();
+        await session.start();
+        ws.open();
+        ws.serverJson({ type: 'speaking_started' });
+
+        // 5 × 10ms = 50ms — well under 200ms. This is the greeting-cutoff bug.
+        for (let i = 0; i < 5; i++) mic(sine(440, 48000, 480, 0.5), 48000);
+        expect(ws.jsonFrames().filter((f) => f.type === 'interrupt')).toHaveLength(0);
+        expect(player.flushes).toBe(0);
+    });
+
+    it('intermittent blips separated by quiet gaps never accumulate to a barge-in', async () => {
+        const { session, ws, mic } = makeSession();
+        await session.start();
+        ws.open();
+        ws.serverJson({ type: 'speaking_started' });
+
+        // 10 loud/quiet pairs: the quiet frame resets the run each time.
+        for (let i = 0; i < 10; i++) {
+            mic(sine(440, 48000, 480, 0.5), 48000); // loud 10ms
+            mic(sine(440, 48000, 480, 0.001), 48000); // quiet 10ms → reset
+        }
+        expect(ws.jsonFrames().filter((f) => f.type === 'interrupt')).toHaveLength(0);
     });
 
     it('quiet mic frames during TTS do NOT interrupt', async () => {
