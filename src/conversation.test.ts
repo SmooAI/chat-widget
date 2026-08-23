@@ -1088,6 +1088,23 @@ describe('ConversationController — dead-session recovery on send', () => {
         expect(everyRenderedText(onMessages)).not.toContain('not found');
     });
 
+    it('drops the OTP proof bound to the dead session when recovering', async () => {
+        // `verifiedEmail` is proof-of-ownership bound to ONE session id. The session
+        // it was proven for is gone, so the proof goes with it (clearSession) rather
+        // than lingering in storage next to a brand-new session.
+        seedLiveSessionThatFailsOnSend('sess-dead', 'SESSION_NOT_FOUND', "session 'sess-dead' not found");
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setVerifiedEmail('ada@example.com', 'sess-dead');
+
+        const { controller, store } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+
+        expect(store.getState().sessionId).toBe('sess-new');
+        expect(store.getState().verifiedEmail).toBeNull();
+        expect(store.getState().verifiedEmailSessionId).toBeNull();
+    });
+
     it('honours a configured connectionErrorMessage for the give-up case', async () => {
         seedLiveSessionThatFailsOnSend('sess-live', 'INTERNAL_ERROR', 'internal detail', null);
         const { controller, onMessages } = makeController({}, { connectionErrorMessage: 'Something went wrong — try again?' });
