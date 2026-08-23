@@ -975,3 +975,125 @@ describe('ConversationController — fast-model preamble (stream_preamble)', () 
         expect(anyPreamble).toBeFalsy();
     });
 });
+
+describe('ConversationController — dead-session recovery on send', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /**
+     * Seed a live persisted session and script the operator so `send_message`
+     * into `deadFor` fails with `code`. Everything else is the default behaviour
+     * (so a retry into a NEW session succeeds).
+     */
+    function seedLiveSessionThatFailsOnSend(sessionId: string, code: string, message: string, deadFor: string | null = sessionId): void {
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId(sessionId);
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId, status: 'active', agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { messages: [], hasMore: false } });
+            } else if (frame.action === 'send_message' && (deadFor === null || frame.sessionId === deadFor)) {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                reply({ type: 'error', requestId, data: { requestId, error: { code, message } } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+    }
+
+    /** Every text the widget ever rendered, across all snapshots (not just the last). */
+    function everyRenderedText(onMessages: ReturnType<typeof vi.fn>): string {
+        return onMessages.mock.calls
+            .flatMap((c) => (c[0] as Array<{ text: string }>).map((m) => m.text))
+            .join('\n');
+    }
+
+    it('replaces a dead session and re-sends the turn — the visitor gets an answer, never the raw error', async () => {
+        // The exact prod failure (2026-08-23): the widget connected fine, then
+        // send_message came back `SESSION_NOT_FOUND` for the session it had just
+        // resumed, and the raw string was rendered as an agent bubble.
+        seedLiveSessionThatFailsOnSend('sess-dead', 'SESSION_NOT_FOUND', "session 'sess-dead' not found");
+
+        const { controller, store, onMessages } = makeController();
+        await controller.connect();
+        expect(store.getState().sessionId).toBe('sess-dead');
+
+        await controller.send('hi can you help me build a website');
+
+        // The stale pointer was cleared and replaced with a fresh session…
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'create_conversation_session')).toHaveLength(1);
+        expect(store.getState().sessionId).toBe('sess-new');
+        // …and the turn was re-sent into it, so the visitor's message got answered.
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'send_message').map((f) => f.sessionId)).toEqual(['sess-dead', 'sess-new']);
+
+        const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; text: string; streaming: boolean }>;
+        expect(last.map((m) => m.text)).toEqual(['hi can you help me build a website', 'Hi there']);
+        expect(last.at(-1)?.streaming).toBe(false);
+
+        // No snapshot ever carried the backend string, the session UUID, or an
+        // `Error:` prefix — not even for one frame mid-recovery.
+        const rendered = everyRenderedText(onMessages);
+        expect(rendered).not.toContain('not found');
+        expect(rendered).not.toContain('sess-dead');
+        expect(rendered).not.toContain('Error:');
+    });
+
+    // A storage blip, an internal fault, or an auth rejection must NOT be treated
+    // as "this session is dead" — spinning up a new session there would abandon a
+    // live conversation the visitor can still come back to.
+    for (const code of ['STORAGE_ERROR', 'INTERNAL_ERROR', 'AUTH_CONTEXT_INVALID', 'LLM_UNAVAILABLE']) {
+        it(`keeps the session on ${code} — no fresh session, no retry, no raw error text`, async () => {
+            seedLiveSessionThatFailsOnSend('sess-live', code, `boom: ${code} on session 'sess-live'`, null);
+
+            const { controller, store, onMessages } = makeController();
+            await controller.connect();
+            await controller.send('hello');
+
+            // The session survives, pointer and all.
+            expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeUndefined();
+            expect(store.getState().sessionId).toBe('sess-live');
+            // And the turn is NOT re-sent (a retry would double-charge a turn that
+            // may well have run server-side).
+            expect(MockSocket.sentFrames.filter((f) => f.action === 'send_message')).toHaveLength(1);
+
+            const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string }>;
+            expect(last.at(-1)?.text).toBe("We couldn't reach the chat.");
+            const rendered = everyRenderedText(onMessages);
+            expect(rendered).not.toContain('boom');
+            expect(rendered).not.toContain('sess-live');
+            expect(rendered).not.toContain('Error:');
+        });
+    }
+
+    it('retries at most once — a server that always says not-found cannot spin sessions in a loop', async () => {
+        seedLiveSessionThatFailsOnSend('sess-dead', 'SESSION_NOT_FOUND', "session 'sess-dead' not found", null);
+
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'create_conversation_session')).toHaveLength(1);
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'send_message')).toHaveLength(2);
+
+        const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string; streaming: boolean }>;
+        expect(last.at(-1)?.text).toBe("We couldn't reach the chat.");
+        expect(last.at(-1)?.streaming).toBe(false);
+        expect(everyRenderedText(onMessages)).not.toContain('not found');
+    });
+
+    it('honours a configured connectionErrorMessage for the give-up case', async () => {
+        seedLiveSessionThatFailsOnSend('sess-live', 'INTERNAL_ERROR', 'internal detail', null);
+        const { controller, onMessages } = makeController({}, { connectionErrorMessage: 'Something went wrong — try again?' });
+        await controller.connect();
+        await controller.send('hello');
+        const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string }>;
+        expect(last.at(-1)?.text).toBe('Something went wrong — try again?');
+    });
+});
