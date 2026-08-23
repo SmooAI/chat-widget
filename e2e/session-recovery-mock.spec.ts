@@ -64,8 +64,16 @@ async function runVisitorTurn(
             // Record EVERY render, not just the settled one. `textContent` of the
             // whole shadow tree covers bubbles, the typing slot AND the status
             // label — a raw backend string must not surface in any of them.
+            // (`<style>` is skipped — it is constant, and dumping ~10kB of CSS
+            // per snapshot on failure buries the text that actually matters.)
             const renders: string[] = [];
-            const snap = () => renders.push(shadow.textContent ?? '');
+            const snap = () =>
+                renders.push(
+                    Array.from(shadow.childNodes)
+                        .filter((n) => n.nodeName !== 'STYLE')
+                        .map((n) => n.textContent ?? '')
+                        .join(' '),
+                );
             new MutationObserver(snap).observe(shadow, { childList: true, subtree: true, characterData: true });
             snap();
 

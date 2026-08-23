@@ -29,6 +29,19 @@ jobs:
         name: Live widget e2e
         runs-on: ubuntu-latest
         timeout-minutes: 45
+        services:
+            # Shared storage for the two-instance spec. pgvector because the
+            # operator's Postgres adapter creates a `vector` column for knowledge;
+            # the stock `postgres` image has no such extension and migration fails.
+            postgres:
+                image: pgvector/pgvector:pg16
+                env:
+                    POSTGRES_PASSWORD: postgres
+                    POSTGRES_DB: operator_e2e
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
         steps:
             # Fail LOUDLY on a missing secret. Without this the specs would
             # `test.skip(...)` and the job would go green having asserted
@@ -67,9 +80,23 @@ jobs:
             # storage + backplane, no tokio-postgres / AWS SDK / redis / nats.
             # Retrieval uses the network-free DeterministicEmbedder, which the
             # operator's own `seeded_kb_returns_17_day_fact` unit test covers.
-            - name: Build smooth-operator-server
+            - name: Build smooth-operator-server (lean)
               working-directory: .smooth-operator/rust
-              run: cargo build -p smooai-smooth-operator-server --bin smooth-operator-server --no-default-features
+              run: |
+                  cargo build -p smooai-smooth-operator-server --bin smooth-operator-server --no-default-features
+                  cp target/debug/smooth-operator-server "$RUNNER_TEMP/operator-lean"
+
+            # The multi-instance spec needs the Postgres storage backend, which
+            # is a different feature set and so a different binary. Kept separate
+            # rather than building everything with `--features postgres`, because
+            # that feature also swaps the DeterministicEmbedder for the
+            # gateway-backed one — which would change what the seeded-KB spec
+            # above is actually testing (and bill for embeddings).
+            - name: Build smooth-operator-server (postgres)
+              working-directory: .smooth-operator/rust
+              run: |
+                  cargo build -p smooai-smooth-operator-server --bin smooth-operator-server --no-default-features --features postgres
+                  cp target/debug/smooth-operator-server "$RUNNER_TEMP/operator-postgres"
 
             - name: Setup pnpm
               uses: pnpm/action-setup@v4
@@ -97,8 +124,20 @@ jobs:
                   SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_KEY }}
                   # The specs default to a local shared-target path; point them
                   # at this checkout's build instead.
-                  SMOOTH_AGENT_SERVER_BIN: ${{ github.workspace }}/.smooth-operator/rust/target/debug/smooth-operator-server
+                  SMOOTH_AGENT_SERVER_BIN: ${{ runner.temp }}/operator-lean
               run: pnpm test:e2e:live
+
+            # Two operator instances, one Postgres — the only shape that can
+            # catch a regression of the cross-pod session hydration (operator
+            # #529). A single-instance spec always finds its own session in its
+            # own memory, so it can never see this.
+            - name: Multi-instance e2e
+              env:
+                  SMOOTH_AGENT_E2E: '1'
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_KEY }}
+                  SMOOTH_AGENT_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/operator_e2e
+                  SMOOTH_AGENT_SERVER_BIN: ${{ runner.temp }}/operator-postgres
+              run: pnpm test:e2e:multi-instance
 
             - name: Upload Playwright artifacts
               if: failure()
