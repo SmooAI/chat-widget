@@ -21,6 +21,14 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const GLOBAL_BUNDLE = readFileSync(`${root}/dist/chat-widget.global.js`, 'utf8');
 
 const AGENT_ID = '2590dfd6-7ed5-484b-bfb4-6d83a97d5a8e';
+
+// The widget POSTs `/internal/resume-by-fingerprint` on mount. Without this
+// stub the "mock" specs make a REAL request to production (which answers 403),
+// so the suite depended on prod being reachable and polluted the page-error
+// assertion. Route it locally to keep these specs hermetic + credential-free.
+test.beforeEach(async ({ page }) => {
+    await page.route('**/internal/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ resumable: false }) }));
+});
 const ENDPOINT = 'wss://ai.smoo.ai/ws';
 
 // Mock WebSocket installed before any widget code runs. It parses outbound

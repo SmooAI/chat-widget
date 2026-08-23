@@ -16,6 +16,12 @@ const STATIC_PORT = Number(process.env.STATIC_PORT ?? 4830);
 
 export default defineConfig({
     testDir: './e2e',
+    // Credential-free split (feature gap G5). PR CI sets E2E_CREDENTIAL_FREE=1
+    // to exclude the specs that need a gateway key / a live operator, so the PR
+    // job's green depends only on assertions that actually ran. Convention: any
+    // spec needing credentials is named `*.live.spec.ts` (or repro-prod), and
+    // the nightly `e2e-live.yml` workflow runs exactly those.
+    testIgnore: process.env.E2E_CREDENTIAL_FREE === '1' ? ['**/*.live.spec.ts', '**/repro-prod.spec.ts'] : [],
     fullyParallel: false,
     workers: 1,
     forbidOnly: !!process.env.CI,

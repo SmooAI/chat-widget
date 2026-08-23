@@ -45,3 +45,45 @@ jobs:
 
             - name: Build
               run: pnpm build
+
+    e2e:
+        name: E2E (credential-free)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: 9
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+
+            - name: Install
+              run: pnpm install --frozen-lockfile
+
+            # The e2e specs load the built IIFE bundle from dist/, so the build
+            # must run before Playwright.
+            - name: Build
+              run: pnpm build
+
+            - name: Install Playwright chromium
+              run: pnpm exec playwright install --with-deps chromium
+
+            # Only the specs that need no gateway key and no live operator. The
+            # credentialed ones run in e2e-live.yml (nightly), so a missing
+            # secret can never masquerade as a green PR here.
+            - name: E2E (credential-free)
+              run: pnpm test:e2e:ci
+
+            - name: Upload Playwright artifacts
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: playwright-results
+                  path: test-results/
+                  retention-days: 7
