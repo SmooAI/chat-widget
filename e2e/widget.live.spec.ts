@@ -22,7 +22,9 @@ import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 
 const AGENT_PORT = 8830;
-const SERVER_BIN = join(homedir(), '.cargo', 'shared-target', 'debug', 'smooth-operator-server');
+// Overridable so CI (which builds into the checkout's own `target/`) can point
+// at its binary; the default is this repo's documented local build location.
+const SERVER_BIN = process.env.SMOOTH_AGENT_SERVER_BIN ?? join(homedir(), '.cargo', 'shared-target', 'debug', 'smooth-operator-server');
 
 const GATEWAY_KEY = process.env.SMOOAI_GATEWAY_KEY ?? '';
 const E2E_ENABLED = process.env.SMOOTH_AGENT_E2E === '1' && GATEWAY_KEY.length > 0;

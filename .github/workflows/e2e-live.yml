@@ -1,0 +1,109 @@
+# Nightly credentialed widget e2e (feature gap G5).
+#
+# Boots a real `smooth-operator-server` (lean, fully in-memory: no database, no
+# auth, no AWS) with the demo knowledge base seeded, loads the built widget in
+# Chromium, and asserts a STREAMED, KNOWLEDGE-GROUNDED reply renders — the
+# seeded fact is a deliberately unusual "17-day return window", so a grounded
+# answer must contain "17".
+#
+# This is separate from ci.yml because it costs money (real LLM calls through
+# the SmooAI gateway) and needs a secret. The credential-free half of the suite
+# runs on every PR in ci.yml.
+name: E2E (live operator, nightly)
+
+on:
+    schedule:
+        # 07:30 UTC daily.
+        - cron: '30 7 * * *'
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: e2e-live
+    cancel-in-progress: false
+
+jobs:
+    live:
+        name: Live widget e2e
+        runs-on: ubuntu-latest
+        timeout-minutes: 45
+        steps:
+            # Fail LOUDLY on a missing secret. Without this the specs would
+            # `test.skip(...)` and the job would go green having asserted
+            # nothing — a suite that reports coverage it does not have.
+            - name: Require credentials
+              env:
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_KEY }}
+              run: |
+                  if [[ -z "$SMOOAI_GATEWAY_KEY" ]]; then
+                      echo "::error::SMOOAI_GATEWAY_KEY is not set. The live e2e cannot run, and skipping it silently would report false coverage."
+                      exit 1
+                  fi
+                  echo "gateway key present (${#SMOOAI_GATEWAY_KEY} chars)"
+
+            - name: Checkout chat-widget
+              uses: actions/checkout@v4
+
+            - name: Checkout smooth-operator
+              uses: actions/checkout@v4
+              with:
+                  repository: SmooAI/smooth-operator
+                  token: ${{ secrets.GH_PAT }}
+                  path: .smooth-operator
+
+            - name: Setup Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: .smooth-operator/rust
+                  # Distinct cache from the operator repo's own CI jobs.
+                  key: chat-widget-e2e
+
+            # `--no-default-features` is the lean local flavour: in-memory
+            # storage + backplane, no tokio-postgres / AWS SDK / redis / nats.
+            # Retrieval uses the network-free DeterministicEmbedder, which the
+            # operator's own `seeded_kb_returns_17_day_fact` unit test covers.
+            - name: Build smooth-operator-server
+              working-directory: .smooth-operator/rust
+              run: cargo build -p smooai-smooth-operator-server --bin smooth-operator-server --no-default-features
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: 9
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+
+            - name: Install
+              run: pnpm install --frozen-lockfile
+
+            - name: Build widget
+              run: pnpm build
+
+            - name: Install Playwright chromium
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Live e2e
+              env:
+                  SMOOTH_AGENT_E2E: '1'
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_KEY }}
+                  # The specs default to a local shared-target path; point them
+                  # at this checkout's build instead.
+                  SMOOTH_AGENT_SERVER_BIN: ${{ github.workspace }}/.smooth-operator/rust/target/debug/smooth-operator-server
+              run: pnpm test:e2e:live
+
+            - name: Upload Playwright artifacts
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: playwright-results-live
+                  path: test-results/
+                  retention-days: 14
