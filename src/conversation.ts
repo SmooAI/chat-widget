@@ -305,6 +305,35 @@ function wireMessageToChat(m: WireMessage, idx: number): ChatMessage | null {
     return { id: typeof m.id === 'string' ? m.id : `hist-${idx}`, role, text, streaming: false };
 }
 
+/**
+ * The one protocol error code that means "the session id we hold is dead" — the
+ * server has no such session (expired, evicted, or it isn't ours). The pointer is
+ * stale, so the correct recovery is to drop it and create a fresh session.
+ *
+ * Deliberately a SINGLE code, matched on `code` and never on the message text:
+ *
+ * - The operator emits a distinct code for every other failure mode
+ *   (`STORAGE_ERROR`, `INTERNAL_ERROR`, `AUTH_CONTEXT_INVALID`,
+ *   `ORIGIN_NOT_ALLOWED`, `LLM_UNAVAILABLE`, `AGENT_ERROR`, `VALIDATION_ERROR`, …).
+ *   A storage blip or an auth failure must NOT spin up a new session — that would
+ *   abandon a live conversation the visitor can still return to. Only a session
+ *   the server says does not exist gets replaced.
+ * - The message string is internal (it interpolates the session UUID), so
+ *   pattern-matching it would break the moment the server rewords it — and a
+ *   backend fix is in flight to stop reporting storage FAILURES as not-found,
+ *   which changes the string but not this code.
+ */
+const DEAD_SESSION_CODE = 'SESSION_NOT_FOUND';
+
+/**
+ * True when `err` says the session id we're holding no longer exists server-side.
+ * Anything else — including every transient/auth/storage failure — is false, so
+ * the caller leaves the existing session (and its history) intact.
+ */
+export function isDeadSessionError(err: unknown): boolean {
+    return err instanceof ProtocolError && err.code === DEAD_SESSION_CODE;
+}
+
 let toolSeq = 0;
 const nextToolId = (): string => `tool-${++toolSeq}`;
 
@@ -809,88 +838,145 @@ export class ConversationController {
         this.emitMessages();
 
         try {
-            const turn = this.client.sendMessage({ sessionId: this.sessionId, message: trimmed, stream: true });
-            this.activeRequestId = turn.requestId;
-
-            for await (const event of turn) {
-                if (event.type === 'stream_token') {
-                    const token = event.token ?? event.data?.token ?? '';
-                    if (token) {
-                        // The real answer has begun — retire the ephemeral preamble.
-                        if (assistant.preamble) assistant.preamble = undefined;
-                        // Hold the streamed text to the same paragraph shape the finalized
-                        // render uses (PARAGRAPH_SEP) so no transient extra blank line
-                        // flickers mid-stream then vanishes on finalize (SMOODEV-2534).
-                        // ponytail: O(n) re-scan per token; fine for chat-length replies.
-                        assistant.text = normalizeParagraphs(assistant.text + token);
-                        // Grow the trailing text block so prose interleaves with any
-                        // tool chips in the order the model produced them.
-                        if (showTools && assistant.blocks) growTextBlock(assistant.blocks, token);
-                        this.emitMessages();
-                    }
-                } else if ((event as { type?: string }).type === 'stream_preamble') {
-                    // Fast-model preamble: show it in the typing slot ONLY while no
-                    // answer text has arrived yet (a late frame after the answer
-                    // started is ignored — the server also guards this). Cast because
-                    // the pinned SDK's union may predate `stream_preamble` (added in
-                    // @smooai/smooth-operator 1.22.15); shape mirrors stream_token.
-                    const pre = event as { token?: string; data?: { token?: string } };
-                    const token = pre.token ?? pre.data?.token ?? '';
-                    if (token && !assistant.text) {
-                        assistant.preamble = (assistant.preamble ?? '') + token;
-                        this.emitMessages();
-                    }
-                } else if (showTools && event.type === 'stream_chunk') {
-                    // Tool activity (gated). Read state.rawResponse.toolCall/.toolResult.
-                    if (assistant.blocks && applyToolChunk(assistant.blocks, event.data?.state)) {
-                        this.emitMessages();
-                    }
-                } else {
-                    // OTP / tool-confirmation pauses surface here; the loop keeps
-                    // iterating once the visitor resumes via verifyOtp/confirmTool.
-                    this.handleTurnEvent(event);
+            await this.streamTurn(trimmed, assistant, showTools);
+        } catch (err) {
+            let failure = err;
+            if (isDeadSessionError(err)) {
+                // The session id we held is gone server-side. Drop the stale pointer,
+                // create a fresh session on the SAME open socket, and re-send once —
+                // transparently, so the visitor's message still gets answered instead
+                // of the widget wedging and every retry landing in the dead session.
+                // A second failure is NOT retried (this path runs once), so a server
+                // that keeps saying not-found can't spin sessions in a loop.
+                try {
+                    await this.recreateSession();
+                    assistant.text = '';
+                    assistant.blocks = showTools ? [] : undefined;
+                    await this.streamTurn(trimmed, assistant, showTools);
+                    return;
+                } catch (retryErr) {
+                    failure = retryErr;
                 }
             }
-
-            const final = await turn;
-            const inner = final.data?.data;
-            const finalText = extractFinalText(inner?.response);
-            if (finalText && finalText.length > assistant.text.length) {
-                assistant.text = finalText;
-            }
-            if (!assistant.text) {
-                assistant.text = '(no response)';
-            }
-            // Attach grounding sources from the terminal event, when present.
-            const citations = extractCitations(inner);
-            if (citations.length > 0) {
-                assistant.citations = citations;
-            }
-            // Suggested follow-up replies from the terminal event, when present.
-            const suggestions = extractSuggestions(inner?.response);
-            if (suggestions.length > 0) {
-                assistant.suggestions = suggestions;
-            }
-            // Only keep blocks for turns that actually invoked a tool — a prose-only
-            // turn drops back to the normal markdown text path (with the final text).
-            if (assistant.blocks && !assistant.blocks.some((b) => b.kind === 'tool')) {
-                assistant.blocks = undefined;
-            }
-            assistant.streaming = false;
-            this.emitMessages();
-        } catch (err) {
-            assistant.streaming = false;
-            const message =
-                err instanceof ProtocolError
-                    ? `Error: ${err.message}`
-                    : (this.config.connectionErrorMessage ?? "We couldn't reach the chat.");
-            assistant.text = assistant.text ? `${assistant.text}\n\n${message}` : message;
-            this.emitMessages();
-            this.setStatus('error', err instanceof Error ? err.message : String(err));
+            this.renderTurnFailure(assistant, failure);
         } finally {
             this.activeRequestId = null;
             this.setInterrupt(null);
         }
+    }
+
+    /**
+     * Replace a dead session with a fresh one, in place. Reuses the recovery
+     * machinery `connect()` already uses when a resume probe fails — `clearSession()`
+     * on the persisted pointer (identity/consent survive) then `createSession()` —
+     * rather than a second, divergent recovery path. It calls `createSession()`
+     * directly instead of re-entering `connect()` because the socket is fine (only
+     * the session id was dead) and `connect()` early-returns while the status is
+     * already `ready`.
+     */
+    private async recreateSession(): Promise<void> {
+        this.store.getState().clearSession();
+        this.sessionId = null;
+        this.conversationId = null;
+        await this.ensureClient();
+        await this.createSession();
+    }
+
+    /**
+     * Render a failed turn. NEVER surfaces the raw error text: a protocol error
+     * message is an internal string — it interpolates the session UUID, and on
+     * 2026-08-23 a live visitor on smoo.ai was shown `Error: session '<uuid>' not
+     * found` in what looks like an agent bubble. This text renders as agent
+     * dialogue, so it gets one short human sentence whatever the failure was. The
+     * machine detail goes to the status channel instead, which the UI renders as a
+     * fixed "Connection issue" label rather than echoing it.
+     */
+    private renderTurnFailure(assistant: ChatMessage, err: unknown): void {
+        assistant.streaming = false;
+        const message = this.config.connectionErrorMessage ?? "We couldn't reach the chat.";
+        assistant.text = assistant.text ? `${assistant.text}\n\n${message}` : message;
+        this.emitMessages();
+        this.setStatus('error', err instanceof Error ? err.message : String(err));
+    }
+
+    /**
+     * Drive one `send_message` turn into `assistant`, streaming tokens in and
+     * finalizing on `eventual_response`. Throws on protocol failure — the caller
+     * decides whether that is recoverable (see {@link isDeadSessionError}).
+     */
+    private async streamTurn(trimmed: string, assistant: ChatMessage, showTools: boolean): Promise<void> {
+        if (!this.client || !this.sessionId) {
+            throw new Error('Conversation is not connected');
+        }
+        const turn = this.client.sendMessage({ sessionId: this.sessionId, message: trimmed, stream: true });
+        this.activeRequestId = turn.requestId;
+
+        for await (const event of turn) {
+            if (event.type === 'stream_token') {
+                const token = event.token ?? event.data?.token ?? '';
+                if (token) {
+                    // The real answer has begun — retire the ephemeral preamble.
+                    if (assistant.preamble) assistant.preamble = undefined;
+                    // Hold the streamed text to the same paragraph shape the finalized
+                    // render uses (PARAGRAPH_SEP) so no transient extra blank line
+                    // flickers mid-stream then vanishes on finalize (SMOODEV-2534).
+                    // ponytail: O(n) re-scan per token; fine for chat-length replies.
+                    assistant.text = normalizeParagraphs(assistant.text + token);
+                    // Grow the trailing text block so prose interleaves with any
+                    // tool chips in the order the model produced them.
+                    if (showTools && assistant.blocks) growTextBlock(assistant.blocks, token);
+                    this.emitMessages();
+                }
+            } else if ((event as { type?: string }).type === 'stream_preamble') {
+                // Fast-model preamble: show it in the typing slot ONLY while no
+                // answer text has arrived yet (a late frame after the answer
+                // started is ignored — the server also guards this). Cast because
+                // the pinned SDK's union may predate `stream_preamble` (added in
+                // @smooai/smooth-operator 1.22.15); shape mirrors stream_token.
+                const pre = event as { token?: string; data?: { token?: string } };
+                const token = pre.token ?? pre.data?.token ?? '';
+                if (token && !assistant.text) {
+                    assistant.preamble = (assistant.preamble ?? '') + token;
+                    this.emitMessages();
+                }
+            } else if (showTools && event.type === 'stream_chunk') {
+                // Tool activity (gated). Read state.rawResponse.toolCall/.toolResult.
+                if (assistant.blocks && applyToolChunk(assistant.blocks, event.data?.state)) {
+                    this.emitMessages();
+                }
+            } else {
+                // OTP / tool-confirmation pauses surface here; the loop keeps
+                // iterating once the visitor resumes via verifyOtp/confirmTool.
+                this.handleTurnEvent(event);
+            }
+        }
+
+        const final = await turn;
+        const inner = final.data?.data;
+        const finalText = extractFinalText(inner?.response);
+        if (finalText && finalText.length > assistant.text.length) {
+            assistant.text = finalText;
+        }
+        if (!assistant.text) {
+            assistant.text = '(no response)';
+        }
+        // Attach grounding sources from the terminal event, when present.
+        const citations = extractCitations(inner);
+        if (citations.length > 0) {
+            assistant.citations = citations;
+        }
+        // Suggested follow-up replies from the terminal event, when present.
+        const suggestions = extractSuggestions(inner?.response);
+        if (suggestions.length > 0) {
+            assistant.suggestions = suggestions;
+        }
+        // Only keep blocks for turns that actually invoked a tool — a prose-only
+        // turn drops back to the normal markdown text path (with the final text).
+        if (assistant.blocks && !assistant.blocks.some((b) => b.kind === 'tool')) {
+            assistant.blocks = undefined;
+        }
+        assistant.streaming = false;
+        this.emitMessages();
     }
 
     /** Map a non-token turn event (OTP / tool-confirmation lifecycle) to interrupt state. */
