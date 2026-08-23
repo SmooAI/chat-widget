@@ -24,11 +24,17 @@
              the conversation session on a UUID agentId. `start-open` so the
              panel is visible immediately without a launcher click. -->
         <script src="/dist/chat-widget.global.js"></script>
-        <smooth-agent-chat
-            endpoint="ws://127.0.0.1:8830/ws"
-            agent-id="11111111-1111-4111-8111-111111111111"
-            agent-name="Support"
-            start-open
-        ></smooth-agent-chat>
+        <script>
+            // The element is created here rather than written inline so a spec can
+            // point it at a specific server instance with `?endpoint=…`
+            // (e2e/multi-instance.live.spec.ts drives TWO). With no query param
+            // this is byte-for-byte the old element.
+            const el = document.createElement('smooth-agent-chat');
+            el.setAttribute('endpoint', new URLSearchParams(location.search).get('endpoint') ?? 'ws://127.0.0.1:8830/ws');
+            el.setAttribute('agent-id', '11111111-1111-4111-8111-111111111111');
+            el.setAttribute('agent-name', 'Support');
+            el.setAttribute('start-open', '');
+            document.body.appendChild(el);
+        </script>
     </body>
 </html>

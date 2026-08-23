@@ -67,6 +67,7 @@
         "test:e2e": "playwright test --project=chromium",
         "test:e2e:ci": "E2E_CREDENTIAL_FREE=1 playwright test --project=chromium",
         "test:e2e:live": "playwright test --project=chromium e2e/widget.live.spec.ts e2e/fullpage.live.spec.ts",
+        "test:e2e:multi-instance": "playwright test --project=chromium e2e/multi-instance.live.spec.ts",
         "check": "pnpm typecheck && pnpm test && pnpm build",
         "changeset": "changeset",
         "ci:publish": "pnpm build && changeset publish"
