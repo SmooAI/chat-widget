@@ -207,7 +207,37 @@ for (const code of ['STORAGE_ERROR', 'INTERNAL_ERROR']) {
         expect(sent.filter((f) => f.action === 'send_message')).toHaveLength(1);
 
         // The visitor sees one short human sentence, not the internal string.
-        expect(finalText).toContain("We couldn't reach the chat.");
+        // Leak first: it is the assertion the incident was about, and a failure
+        // here must be what the report shows rather than being masked by the
+        // friendly-text check that fails for the same reason.
         expectNoLeakedInternals(renders, 'boom', LIVE_SESSION);
+        expect(finalText).toContain("We couldn't reach the chat.");
     });
 }
+
+test('a server that keeps saying not-found is retried exactly once, and still never leaks the error', async ({ page }) => {
+    // The prod shape with recovery ALSO failing: this is the only scenario where
+    // the visitor reaches renderTurnFailure holding a SESSION_NOT_FOUND, i.e. the
+    // exact string (`session '<uuid>' not found`) they were shown on 2026-08-23.
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e) => pageErrors.push(`${e.name}: ${e.message}`));
+
+    const { renders, sent, finalText } = await runVisitorTurn(
+        page,
+        operatorScript({
+            ids: [DEAD_SESSION, FRESH_SESSION],
+            deadSessions: [DEAD_SESSION, FRESH_SESSION],
+            code: 'SESSION_NOT_FOUND',
+            message: `session '${DEAD_SESSION}' not found`,
+        }),
+    );
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+
+    // Exactly one recovery attempt — a not-found loop must not spin sessions.
+    expect(sent.filter((f) => f.action === 'create_conversation_session')).toHaveLength(2);
+    expect(sent.filter((f) => f.action === 'send_message')).toHaveLength(2);
+
+    expectNoLeakedInternals(renders, 'not found', DEAD_SESSION);
+    expect(finalText).toContain("We couldn't reach the chat.");
+});
