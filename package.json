@@ -1,7 +1,7 @@
 {
     "name": "@smooai/chat-widget",
     "version": "0.16.3",
-    "description": "Embeddable AI chat as a framework-light web component — the Aurora Glass design, streaming replies, grounded sources, and per-brand theming. Speaks the smooth-operator WebSocket protocol.",
+    "description": "Embeddable AI chat as a framework-light web component \u2014 the Aurora Glass design, streaming replies, grounded sources, and per-brand theming. Speaks the smooth-operator WebSocket protocol.",
     "license": "MIT",
     "author": "SmooAI",
     "type": "module",
@@ -85,5 +85,6 @@
         "tsdown": "^0.22.0",
         "typescript": "^5.7.3",
         "vitest": "^2.1.8"
-    }
+    },
+    "packageManager": "pnpm@10.34.5"
 }
