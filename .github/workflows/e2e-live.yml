@@ -100,14 +100,21 @@ jobs:
 
             - name: Setup pnpm
               uses: pnpm/action-setup@v4
-              with:
-                  version: 9
 
-            - name: Setup Node
-              uses: actions/setup-node@v4
+            # Toolchains come from mise.toml, read here by mise-action so the runner
+            # and a developer's shell resolve identical versions.
+            - name: Setup toolchains (mise)
+              uses: jdx/mise-action@v4
+
+            - name: Locate pnpm store
+              run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+            - name: Cache pnpm store
+              uses: actions/cache@v4
               with:
-                  node-version: 22
-                  cache: pnpm
+                  path: ${{ env.STORE_PATH }}
+                  key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+                  restore-keys: ${{ runner.os }}-pnpm-store-
 
             - name: Install
               run: pnpm install --frozen-lockfile
