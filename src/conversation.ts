@@ -778,13 +778,22 @@ export class ConversationController {
      */
     private async tryResume(sessionId: string): Promise<boolean> {
         if (!this.client) return false;
-        let snap: { status?: 'active' | 'idle' | 'ended'; conversationId?: string };
+        // `| undefined` is load-bearing, not defensive noise. The client's
+        // `extractImmediateData` hands back `event.data` for ANY
+        // `immediate_response` without checking its status, so an error-status
+        // reply that carries no `data` (auth rejection, 5xx) RESOLVES as
+        // `undefined` instead of rejecting. Typing this non-optional is what let
+        // `snap.status` throw a TypeError OUTSIDE the catch below — which
+        // propagated out of `connect()` and took the whole chat down for a
+        // returning visitor, over a resume that was only ever an enhancement.
+        let snap: { status?: 'active' | 'idle' | 'ended'; conversationId?: string } | undefined;
         try {
             snap = await this.client.getSession({ sessionId });
         } catch {
             return false; // 404 / SESSION_NOT_FOUND / network — start fresh.
         }
-        if (snap.status === 'ended') return false;
+        // No snapshot, or an ended one → not resumable. Start fresh.
+        if (!snap || snap.status === 'ended') return false;
 
         this.sessionId = sessionId;
         this.conversationId = snap.conversationId ?? null;
@@ -821,12 +830,6 @@ export class ConversationController {
     async send(text: string): Promise<void> {
         const trimmed = text.trim();
         if (!trimmed) return;
-        if (!this.client || !this.sessionId || this.status !== 'ready') {
-            await this.connect();
-        }
-        if (!this.client || !this.sessionId) {
-            throw new Error('Conversation is not connected');
-        }
 
         // 1. User bubble.
         this.messages.push({ id: this.nextId('u'), role: 'user', text: trimmed, streaming: false });
@@ -837,7 +840,19 @@ export class ConversationController {
         this.messages.push(assistant);
         this.emitMessages();
 
+        // Connecting happens INSIDE the try, after the bubbles are on screen, so a
+        // genuinely fatal connect (no transport at all) renders the one human
+        // sentence like any other failed turn. Previously it rejected out of
+        // `send()`: the visitor's typed text vanished with an empty transcript,
+        // and the caller's un-caught `void send()` raised an unhandled rejection
+        // on the host page.
         try {
+            if (!this.client || !this.sessionId || this.status !== 'ready') {
+                await this.connect();
+            }
+            if (!this.client || !this.sessionId) {
+                throw new Error('Conversation is not connected');
+            }
             await this.streamTurn(trimmed, assistant, showTools);
         } catch (err) {
             let failure = err;
