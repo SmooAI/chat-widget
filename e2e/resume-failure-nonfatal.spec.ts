@@ -43,7 +43,7 @@ const PROBED_SESSION = 'c9f5a1b3-82d4-4e6a-8b17-3a6d8e2f94c5';
 const ANSWER = 'Yes — I can help you build that.';
 
 /** The operator half of the mock: hand out a session id, then answer normally. */
-function operatorScript(opts: { getSessionReply?: string; slowCreate?: boolean } = {}): string {
+function operatorScript(opts: { getSessionReply?: string; slowCreate?: boolean; ackFirst?: boolean } = {}): string {
     return `
 (() => {
   return (f, reply) => {
@@ -56,8 +56,11 @@ function operatorScript(opts: { getSessionReply?: string; slowCreate?: boolean }
       return;
     }
     if (f.action === 'create_conversation_session') {
-      // A real create is not instantaneous. The delay is what opens the window
-      // an awaiting caller used to resolve straight through.
+      // The prod-observed shape: an ACK carrying NO session id, with the real
+      // one arriving on a LATER frame. The client resolves a request on the
+      // FIRST frame for its requestId, so this is what resolved the create with
+      // an empty payload — the widget then reported ready with no session.
+      ${opts.ackFirst ? "reply({ type: 'immediate_response', requestId: f.requestId, status: 202, data: {} });" : ''}
       setTimeout(() => {
         reply({ type: 'immediate_response', requestId: f.requestId, status: 202,
           data: { sessionId: ${JSON.stringify(FRESH_SESSION)}, conversationId: 'conv-1', agentId: f.agentId } });
@@ -215,19 +218,23 @@ test('a data-less error reply to get_session on the probed session still gives t
 });
 
 /**
- * The pre-chat race, in the REAL rendered UI (prod, smoo.ai, 2026-08-24).
- *
- * A clean visitor completed the pre-chat form, the status went "Online", and
- * every send then failed with "We couldn't reach the chat." The pre-chat submit
- * fires a fire-and-forget `void connect()`, and the visitor's first send awaited
- * another one milliseconds later — which resolved immediately, before any
- * session existed, so the turn went out (or died) against a session id the
- * server had never issued.
+ * The pre-chat path end to end, in the REAL rendered UI (prod, smoo.ai,
+ * 2026-08-24): a clean visitor completed the pre-chat form, the status went
+ * "Online", and then EVERY send failed with "We couldn't reach the chat."
  *
  * smoo.ai's live config is `requireName: true, requireEmail: true`, so the
- * pre-chat gate is on the path every real visitor takes.
+ * pre-chat gate — which fires its own fire-and-forget `void connect()` — is on
+ * the path every real visitor takes. Two turns are sent, because the reported
+ * symptom was that every send failed, not just the first.
+ *
+ * NOTE ON SCOPE: this is the pre-chat smoke + frame-ordering guard. It cannot
+ * exercise the connect RACE itself, because the composer stays disabled until
+ * connect resolves, so a browser-driven click can't land inside the window. The
+ * race and the no-sessionId wedge are pinned precisely in the unit tests
+ * ("connect races (send never outruns its session)" in src/conversation.test.ts),
+ * where the send can be issued against an in-flight connect directly.
  */
-test('the pre-chat submit → immediate send sequence never outruns its session', async ({ page }) => {
+test('a pre-chat visitor gets every turn answered, each into the session create issued', async ({ page }) => {
     const pageErrors: string[] = [];
     page.on('pageerror', (e) => pageErrors.push(`${e.name}: ${e.message}`));
 
@@ -258,8 +265,9 @@ test('the pre-chat submit → immediate send sequence never outruns its session'
                 input.value = input.name === 'email' ? 'visitor@example.test' : 'Test Visitor';
                 input.dispatchEvent(new Event('input', { bubbles: true }));
             }
-            // Submit the gate and send AS SOON AS the composer accepts it — the
-            // window in which the pre-chat's `void connect()` is still in flight.
+            // Submit the gate, wait for the composer the way a visitor does, then
+            // send — TWICE, because the prod symptom was that every send failed,
+            // not just the first.
             (shadow.querySelector('.pc-submit') as HTMLElement).click();
             let textarea: HTMLTextAreaElement | null = null;
             for (let i = 0; i < 200; i++) {
@@ -269,9 +277,13 @@ test('the pre-chat submit → immediate send sequence never outruns its session'
                 await sleep(10);
             }
             if (!textarea) return { error: 'still gated' };
-            textarea.value = 'can you help me build a website';
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
-            (shadow.querySelector('.send') as HTMLElement).click();
+            for (const text of ['can you help me build a website', 'and what does it cost']) {
+                const ta = shadow.querySelector('textarea') as HTMLTextAreaElement;
+                ta.value = text;
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                (shadow.querySelector('.send') as HTMLElement).click();
+                await sleep(400);
+            }
 
             let quiet = 0;
             let lastLen = -1;
@@ -296,12 +308,14 @@ test('the pre-chat submit → immediate send sequence never outruns its session'
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
     expect(out.error).toBeUndefined();
-    // Exactly one session, created BEFORE the turn that references it — not the
-    // inverted order the live socket trace showed.
-    expect(out.order).toEqual(['create_conversation_session', 'send_message']);
-    // The turn carried the id the server actually issued, so no SESSION_NOT_FOUND
-    // and therefore no recovery loop.
-    expect(out.sendSessionIds).toEqual([FRESH_SESSION]);
+    // Every turn went out AFTER a create, never before one — the inverted order
+    // the live socket trace showed.
+    expect((out.order ?? []).indexOf('send_message')).toBeGreaterThan((out.order ?? []).indexOf('create_conversation_session'));
+    // BOTH turns were sent, and both carried the id the server actually issued —
+    // so no SESSION_NOT_FOUND, and therefore no recovery loop.
+    expect(out.sendSessionIds).toEqual([FRESH_SESSION, FRESH_SESSION]);
+    // Bounded: the widget did not spin sessions trying to recover.
+    expect((out.order ?? []).filter((a) => a === 'create_conversation_session')).toHaveLength(1);
     expect(out.transcript).toContain(ANSWER);
     expect(out.transcript).not.toContain("couldn't reach the chat");
     expect(out.status).not.toContain('Connection issue');

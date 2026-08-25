@@ -662,6 +662,11 @@ export class ConversationController {
         // 'ready' status with no sessionId is a wedge: `send()` calls connect()
         // precisely because the id is missing, so early-returning on status alone
         // would send it back to the same throw on EVERY turn, forever.
+        // ponytail: the `&& this.sessionId` half is belt-and-braces and has NO
+        // failing test — `createSession()` now refuses to reach 'ready' without an
+        // id, so nothing can currently construct that state. Kept because it is one
+        // condition and it is the difference between "retry" and "wedged forever"
+        // if another path ever sets 'ready' on its own. Delete it with that guard.
         if (this.status === 'ready' && this.sessionId) return;
         this.connecting = this.openSession().finally(() => {
             this.connecting = null;
