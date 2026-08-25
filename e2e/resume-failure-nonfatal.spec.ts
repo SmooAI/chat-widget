@@ -43,7 +43,7 @@ const PROBED_SESSION = 'c9f5a1b3-82d4-4e6a-8b17-3a6d8e2f94c5';
 const ANSWER = 'Yes — I can help you build that.';
 
 /** The operator half of the mock: hand out a session id, then answer normally. */
-function operatorScript(opts: { getSessionReply?: string } = {}): string {
+function operatorScript(opts: { getSessionReply?: string; slowCreate?: boolean } = {}): string {
     return `
 (() => {
   return (f, reply) => {
@@ -56,8 +56,12 @@ function operatorScript(opts: { getSessionReply?: string } = {}): string {
       return;
     }
     if (f.action === 'create_conversation_session') {
-      reply({ type: 'immediate_response', requestId: f.requestId, status: 202,
-        data: { sessionId: ${JSON.stringify(FRESH_SESSION)}, conversationId: 'conv-1', agentId: f.agentId } });
+      // A real create is not instantaneous. The delay is what opens the window
+      // an awaiting caller used to resolve straight through.
+      setTimeout(() => {
+        reply({ type: 'immediate_response', requestId: f.requestId, status: 202,
+          data: { sessionId: ${JSON.stringify(FRESH_SESSION)}, conversationId: 'conv-1', agentId: f.agentId } });
+      }, ${opts.slowCreate ? 40 : 0});
       return;
     }
     if (f.action === 'send_message') {
@@ -208,4 +212,97 @@ test('a data-less error reply to get_session on the probed session still gives t
     expect(persistedSessionId).toBe(FRESH_SESSION);
     expect(finalText).toContain(ANSWER);
     expectNoConnectionError(renders);
+});
+
+/**
+ * The pre-chat race, in the REAL rendered UI (prod, smoo.ai, 2026-08-24).
+ *
+ * A clean visitor completed the pre-chat form, the status went "Online", and
+ * every send then failed with "We couldn't reach the chat." The pre-chat submit
+ * fires a fire-and-forget `void connect()`, and the visitor's first send awaited
+ * another one milliseconds later — which resolved immediately, before any
+ * session existed, so the turn went out (or died) against a session id the
+ * server had never issued.
+ *
+ * smoo.ai's live config is `requireName: true, requireEmail: true`, so the
+ * pre-chat gate is on the path every real visitor takes.
+ */
+test('the pre-chat submit → immediate send sequence never outruns its session', async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', (e) => pageErrors.push(`${e.name}: ${e.message}`));
+
+    await page.addInitScript(MOCK_WS);
+    await page.goto(`${STATIC_ORIGIN}/e2e/fixtures/blank.html`);
+    await page.addScriptTag({ content: GLOBAL_BUNDLE });
+
+    const out = await page.evaluate(
+        async ({ endpoint, agentId, scriptSrc }) => {
+            const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+            const w = window as unknown as {
+                __sent: Array<Record<string, unknown>>;
+                __script: unknown;
+                SmoothAgentChat: { mount: (o: unknown) => Element };
+            };
+            localStorage.clear();
+            // eslint-disable-next-line no-eval
+            w.__script = eval(scriptSrc);
+
+            // smoo.ai's live gate.
+            const el = w.SmoothAgentChat.mount({ endpoint, agentId, greeting: '', requireName: true, requireEmail: true });
+            const shadow = (el as unknown as { shadowRoot: ShadowRoot }).shadowRoot;
+
+            (shadow.querySelector('.launcher') as HTMLElement).click();
+            await sleep(150);
+            for (const input of Array.from(shadow.querySelectorAll('.pc-form input')) as HTMLInputElement[]) {
+                if (input.type === 'checkbox') continue;
+                input.value = input.name === 'email' ? 'visitor@example.test' : 'Test Visitor';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            // Submit the gate and send AS SOON AS the composer accepts it — the
+            // window in which the pre-chat's `void connect()` is still in flight.
+            (shadow.querySelector('.pc-submit') as HTMLElement).click();
+            let textarea: HTMLTextAreaElement | null = null;
+            for (let i = 0; i < 200; i++) {
+                textarea = shadow.querySelector('textarea');
+                const send = shadow.querySelector('.send') as HTMLButtonElement | null;
+                if (textarea && send && !send.disabled) break;
+                await sleep(10);
+            }
+            if (!textarea) return { error: 'still gated' };
+            textarea.value = 'can you help me build a website';
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            (shadow.querySelector('.send') as HTMLElement).click();
+
+            let quiet = 0;
+            let lastLen = -1;
+            for (let i = 0; i < 200; i++) {
+                await sleep(50);
+                const streaming = !!shadow.querySelector('.bubble.assistant.streaming, .typing');
+                if (!streaming && w.__sent.length === lastLen) {
+                    if (++quiet >= 6) break;
+                } else quiet = 0;
+                lastLen = w.__sent.length;
+            }
+
+            return {
+                order: w.__sent.map((f) => f.action as string),
+                sendSessionIds: w.__sent.filter((f) => f.action === 'send_message').map((f) => f.sessionId as string),
+                transcript: (shadow.querySelector('.messages') as HTMLElement | null)?.innerText ?? '',
+                status: (shadow.querySelector('.status-text') as HTMLElement | null)?.textContent ?? '',
+            };
+        },
+        { endpoint: ENDPOINT, agentId: AGENT_ID, scriptSrc: operatorScript({ slowCreate: true }) },
+    );
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+    expect(out.error).toBeUndefined();
+    // Exactly one session, created BEFORE the turn that references it — not the
+    // inverted order the live socket trace showed.
+    expect(out.order).toEqual(['create_conversation_session', 'send_message']);
+    // The turn carried the id the server actually issued, so no SESSION_NOT_FOUND
+    // and therefore no recovery loop.
+    expect(out.sendSessionIds).toEqual([FRESH_SESSION]);
+    expect(out.transcript).toContain(ANSWER);
+    expect(out.transcript).not.toContain("couldn't reach the chat");
+    expect(out.status).not.toContain('Connection issue');
 });

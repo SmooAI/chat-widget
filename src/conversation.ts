@@ -408,6 +408,8 @@ export class ConversationController {
      * session we already decided not to resume.
      */
     private resumeAttempted = false;
+    /** The in-flight connect, so concurrent callers await the SAME one. See {@link connect}. */
+    private connecting: Promise<void> | null = null;
     /**
      * HTTP base for the chat-ws wrapper's `/internal/*` REST routes. `null` when
      * the configured WS endpoint could not be parsed into an absolute origin — in
@@ -643,7 +645,32 @@ export class ConversationController {
      * 3. Otherwise create a fresh session.
      */
     async connect(): Promise<void> {
-        if (this.status === 'connecting' || this.status === 'ready') return;
+        // Concurrent callers share ONE connect, and every caller's `await`
+        // resolves when THAT connect finishes.
+        //
+        // This used to `return` bare while a connect was in flight. The guard was
+        // right — one connect, not two — but returning an already-resolved promise
+        // made `await connect()` a lie: it resolved BEFORE any session existed, so
+        // `send()` fell straight through to its `!this.sessionId` throw. Four of
+        // the six call sites are fire-and-forget `void connect()` (launcher click,
+        // pre-chat submit, full-page mount, voice hand-off), so an awaiting caller
+        // racing an in-flight one is the NORMAL case, not an edge: on smoo.ai the
+        // pre-chat submit fires one and the visitor's first send awaits another
+        // milliseconds later.
+        if (this.connecting) return this.connecting;
+        // Already connected — but only if a session actually came out of it. A
+        // 'ready' status with no sessionId is a wedge: `send()` calls connect()
+        // precisely because the id is missing, so early-returning on status alone
+        // would send it back to the same throw on EVERY turn, forever.
+        if (this.status === 'ready' && this.sessionId) return;
+        this.connecting = this.openSession().finally(() => {
+            this.connecting = null;
+        });
+        return this.connecting;
+    }
+
+    /** The actual connect body. Serialized by {@link connect}; never call directly. */
+    private async openSession(): Promise<void> {
         this.setStatus('connecting');
         try {
             await this.ensureClient();
@@ -767,6 +794,16 @@ export class ConversationController {
             supports: [...SUPPORTED_INTERACTION_CAPABILITIES],
             ...(metadata ? { metadata } : {}),
         });
+        // Refuse a create that produced no session id. `request()` resolves on the
+        // FIRST frame carrying the requestId, so a wrapper that ACKs before the
+        // session exists resolves this call with an empty payload — and assigning
+        // `undefined` here then flipping the status to 'ready' wedges the widget
+        // permanently: every later `send()` hits `!this.sessionId`, calls
+        // `connect()`, is early-returned by the 'ready' status, and throws again.
+        // Failing here keeps that honest and retryable instead of silent.
+        if (!session?.sessionId) {
+            throw new Error('create_conversation_session returned no sessionId');
+        }
         this.sessionId = session.sessionId;
         this.conversationId = session.conversationId ?? null;
         this.store.getState().setSessionId(session.sessionId);
