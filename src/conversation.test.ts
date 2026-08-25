@@ -1114,3 +1114,232 @@ describe('ConversationController — dead-session recovery on send', () => {
         expect(last.at(-1)?.text).toBe('Something went wrong — try again?');
     });
 });
+
+/**
+ * The optional resume probe must never take the chat down (SMOODEV, 2026-08-23).
+ *
+ * `/internal/resume-by-fingerprint` is an ENHANCEMENT — it recovers a returning
+ * anonymous visitor's prior thread. Against prod it answers 401
+ * (`AUTH_CONTEXT_REQUIRED`: the route is fail-closed for any agent with a
+ * `public_key`, and the anonymous marketing widget sends no authContext) while
+ * the WS create path stays permissive and healthy. So the probe failing is the
+ * NORMAL steady state for a public agent, and every failure of it — 401, 5xx, a
+ * network rejection, a malformed body — must degrade to "start a fresh session",
+ * never to "the chat is unavailable".
+ *
+ * The boundary these tests pin: a failure REACHING THE OPTIONAL PROBE is
+ * recoverable by starting fresh; a failure reaching the TRANSPORT ITSELF (no
+ * socket) is genuinely fatal and must still surface the one human sentence.
+ */
+describe('ConversationController — an optional resume failure is never fatal', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /** Every way the probe can fail. Each must land on a fresh, working session. */
+    const probeFailures: Array<[label: string, router: typeof fetchRouter]> = [
+        ['401 AUTH_CONTEXT_REQUIRED (the live prod response)', () => ({ status: 401, json: { error: { code: 'AUTH_CONTEXT_REQUIRED', message: 'this agent requires a signed authContext' } } })],
+        ['500 from the wrapper', () => ({ status: 500, json: { error: { code: 'INTERNAL_ERROR', message: 'boom' } } })],
+        [
+            'a network rejection (fetch itself throws)',
+            () => {
+                throw new TypeError('Failed to fetch');
+            },
+        ],
+        ['a malformed 200 body (no resumable/sessionId)', () => ({ json: { unexpected: true } })],
+    ];
+
+    for (const [label, router] of probeFailures) {
+        it(`falls through to a fresh working session on ${label}`, async () => {
+            fetchRouter = router;
+            const { controller, store, onMessages } = makeController();
+
+            await expect(controller.connect()).resolves.toBeUndefined();
+            expect(fetchCalls.some((c) => c.path === '/internal/resume-by-fingerprint')).toBe(true);
+            // Degraded gracefully: a brand-new session, not an error.
+            expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeTruthy();
+            expect(store.getState().sessionId).toBe('sess-new');
+            expect(controller.connectionStatus).toBe('ready');
+
+            // And the visitor gets a real answer, with no error text in the transcript.
+            await controller.send('hello');
+            const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; text: string }>;
+            expect(last.at(-1)?.text).toBe('Hi there');
+            expect(last.some((m) => /couldn't reach the chat/i.test(m.text))).toBe(false);
+        });
+    }
+
+    it('a persisted pointer whose get_session REJECTS still recovers into a fresh session', async () => {
+        // Regression guard for the sibling path: the persisted-pointer branch has
+        // always cleared the pointer and created fresh; keep it that way.
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-old');
+        MockSocket.onFrame = (frame, reply) => {
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId: frame.requestId, status: 500, error: { code: 'STORAGE_ERROR', message: 'db down' } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+
+        const { controller, store, onMessages } = makeController();
+        await expect(controller.connect()).resolves.toBeUndefined();
+        expect(store.getState().sessionId).toBe('sess-new');
+        expect(controller.connectionStatus).toBe('ready');
+
+        await controller.send('hello');
+        const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string }>;
+        expect(last.at(-1)?.text).toBe('Hi there');
+    });
+
+    it('a genuinely unreachable endpoint is STILL fatal — the visitor sees the one human sentence', async () => {
+        // The other side of the boundary: no transport at all is not recoverable by
+        // starting fresh, so it must NOT be swallowed. It renders the human sentence
+        // in the transcript (never the raw machine error) and flags the status channel.
+        (globalThis as unknown as { WebSocket: unknown }).WebSocket = class {
+            constructor() {
+                throw new Error('ECONNREFUSED wss://example.test/ws');
+            }
+        };
+
+        const { controller, onMessages, onStatus } = makeController();
+        // `send()` must not reject: a dropped promise means the visitor's typed text
+        // vanishes with nothing in the transcript (and an unhandled rejection on the
+        // host page).
+        await expect(controller.send('hello')).resolves.toBeUndefined();
+
+        const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; text: string }>;
+        expect(last.at(-1)?.text).toBe("We couldn't reach the chat.");
+        // The user's own message is still in the transcript — it wasn't silently eaten.
+        expect(last.some((m) => m.role === 'user' && m.text === 'hello')).toBe(true);
+        // Raw machine detail goes to the status channel, never the bubble.
+        expect(last.some((m) => /ECONNREFUSED/.test(m.text))).toBe(false);
+        expect(onStatus.mock.calls.some(([s]) => s === 'error')).toBe(true);
+    });
+});
+
+/**
+ * `send()` must never emit a turn before the session it references exists.
+ *
+ * Prod, smoo.ai: a clean visitor completed the pre-chat form, the status went
+ * "Online", and then EVERY send failed with "We couldn't reach the chat." An
+ * instrumented socket showed `send_message` leaving BEFORE the
+ * `create_conversation_session` response came back.
+ *
+ * Four of the six `connect()` call sites are fire-and-forget `void connect()`
+ * (launcher click, pre-chat submit, full-page mount, voice hand-off), so an
+ * awaiting caller racing an in-flight one is the NORMAL case. `connect()` used
+ * to `return` bare while one was in flight — the right guard (one connect, not
+ * two) returning the wrong thing (an already-resolved promise), which made every
+ * `await connect()` resolve before a session existed.
+ */
+describe('ConversationController — connect races (send never outruns its session)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /** Operator whose `create_conversation_session` answers only after a tick. */
+    function slowCreate(sessionId = 'sess-new'): void {
+        MockSocket.onFrame = (frame, reply) => {
+            if (frame.action === 'create_conversation_session') {
+                setTimeout(() => {
+                    reply({ type: 'immediate_response', requestId: frame.requestId, status: 202, data: { sessionId, conversationId: 'conv-1', agentId: frame.agentId } });
+                }, 5);
+                return;
+            }
+            defaultOnFrame(frame, reply);
+        };
+    }
+
+    /** The frame order the live instrumentation printed, as a comparable list. */
+    const frameOrder = () => MockSocket.sentFrames.map((f) => f.action as string);
+
+    it('a send racing an in-flight connect waits for it, and carries the created session id', async () => {
+        // Exactly the pre-chat submit → visitor sends immediately sequence.
+        slowCreate('sess-created');
+        const { controller } = makeController();
+
+        void controller.connect(); // the fire-and-forget one (pre-chat submit)
+        await controller.send('hello'); // the visitor's first turn, milliseconds later
+
+        // ONE session was created — the in-flight guard still holds…
+        expect(frameOrder().filter((a) => a === 'create_conversation_session')).toHaveLength(1);
+        // …the create was ordered BEFORE the send (never the inverted order the
+        // live socket trace showed)…
+        expect(frameOrder()).toEqual(['create_conversation_session', 'send_message']);
+        // …and the turn went into the session that create actually produced.
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'send_message').map((f) => f.sessionId)).toEqual(['sess-created']);
+    });
+
+    it('concurrent connects share one connect and one session', async () => {
+        slowCreate();
+        const { controller } = makeController();
+        await Promise.all([controller.connect(), controller.connect(), controller.connect()]);
+        expect(frameOrder().filter((a) => a === 'create_conversation_session')).toHaveLength(1);
+        expect(controller.connectionStatus).toBe('ready');
+    });
+
+    it('a create that yields no sessionId FAILS instead of reporting ready', async () => {
+        // `request()` resolves on the FIRST frame carrying the requestId, so a
+        // wrapper that ACKs before the session exists resolves the create with an
+        // empty payload. Accepting that assigned `undefined` and flipped the
+        // status to 'ready' — the permanent wedge behind "status went Online, then
+        // every send fails": each later send hits `!this.sessionId`, calls
+        // `connect()`, is early-returned by the 'ready' status, and throws again.
+        MockSocket.onFrame = (frame, reply) => {
+            if (frame.action === 'create_conversation_session') {
+                reply({ type: 'immediate_response', requestId: frame.requestId, status: 202, data: {} });
+                return;
+            }
+            defaultOnFrame(frame, reply);
+        };
+        const { controller } = makeController();
+
+        await expect(controller.connect()).rejects.toThrow(/no sessionId/);
+        expect(controller.connectionStatus).toBe('error');
+        // No turn was emitted into a session that does not exist.
+        expect(frameOrder()).not.toContain('send_message');
+    });
+
+    it('a wedged connect cannot spin: repeated sends make a BOUNDED number of attempts', async () => {
+        // The loop the live trace showed — send fails, recovery creates, the retry
+        // fails again — must not be unbounded. Each send is allowed to try to
+        // establish a session; none may retry within itself forever.
+        MockSocket.onFrame = (frame, reply) => {
+            if (frame.action === 'create_conversation_session') {
+                reply({ type: 'immediate_response', requestId: frame.requestId, status: 202, data: {} });
+                return;
+            }
+            defaultOnFrame(frame, reply);
+        };
+        const { controller, onMessages } = makeController();
+
+        for (let i = 0; i < 3; i++) await controller.send(`attempt ${i}`);
+
+        // One create attempt per visitor send — never a self-feeding loop.
+        expect(frameOrder().filter((a) => a === 'create_conversation_session')).toHaveLength(3);
+        expect(frameOrder()).not.toContain('send_message');
+        // And every attempt told the visitor the same one human sentence.
+        const last = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string }>;
+        expect(last.at(-1)?.text).toBe("We couldn't reach the chat.");
+        expect(last.some((m) => /sessionId/.test(m.text))).toBe(false);
+    });
+
+    it('a send after a successful connect reuses the session — no reconnect, no second create', async () => {
+        slowCreate('sess-created');
+        const { controller } = makeController();
+        await controller.connect();
+        await controller.send('one');
+        await controller.send('two');
+        expect(frameOrder().filter((a) => a === 'create_conversation_session')).toHaveLength(1);
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'send_message').map((f) => f.sessionId)).toEqual(['sess-created', 'sess-created']);
+    });
+});
