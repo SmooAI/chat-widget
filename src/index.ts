@@ -59,6 +59,7 @@ export {
     type IdentityRestore,
     type MessageBlock,
     type RestorableConversation,
+    type ResumeProbeResult,
     type Role,
     type ToolCall,
     type UserInfo,

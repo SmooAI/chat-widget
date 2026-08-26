@@ -31,7 +31,7 @@ import { type Citation, ProtocolError, type ServerEvent, SmoothAgentClient } fro
 import type { StoreApi } from 'zustand/vanilla';
 import type { ChatWidgetConfig } from './config.js';
 import { getOrCreateFingerprint } from './fingerprint.js';
-import { type ConsentState, createWidgetStore, type WidgetStore } from './persistence.js';
+import { type ConsentState, createWidgetStore, isStorageDurable, type WidgetStore } from './persistence.js';
 
 /**
  * Derive the HTTP base for the chat-ws wrapper's `/internal/*` REST routes from
@@ -204,6 +204,20 @@ export type IdentityRestore =
     | { phase: 'resolving'; email: string }
     | { phase: 'resolved'; email: string; conversations: RestorableConversation[] }
     | { phase: 'error'; message: string };
+
+/**
+ * Outcome of the `/internal/resume-by-fingerprint` probe.
+ *
+ * `reason` is ALWAYS populated: the server's own string when the response carries
+ * one, a locally-derived label when it does not. It exists so a `sessionId: null`
+ * is legible — see {@link ConversationController.lastResumeReason}.
+ */
+export interface ResumeProbeResult {
+    /** The session the wrapper says is resumable, or null when there is none. */
+    sessionId: string | null;
+    /** Why. Low-cardinality, log-safe, never parsed — displayed/logged verbatim. */
+    reason: string;
+}
 
 export interface ConversationEvents {
     /** Fired whenever the message list changes (append, token delta, finalize). */
@@ -408,6 +422,10 @@ export class ConversationController {
      * session we already decided not to resume.
      */
     private resumeAttempted = false;
+    /** Reason from the last fingerprint probe; null until one has run. */
+    private resumeReason: string | null = null;
+    /** How this connect reached `createSession()`. Rides the session metadata. */
+    private pointerState: 'none' | 'dead' | 'recovery' = 'none';
     /** The in-flight connect, so concurrent callers await the SAME one. See {@link connect}. */
     private connecting: Promise<void> | null = null;
     /**
@@ -467,6 +485,15 @@ export class ConversationController {
     /** The persisted store, exposed so the view can read identity for the pre-chat gate. */
     getStore(): StoreApi<WidgetStore> {
         return this.store;
+    }
+
+    /**
+     * Why the last fingerprint resume probe did or did not adopt a session, or
+     * null before one has run. Diagnostic surface for "this visitor got a second
+     * conversation, why?" — the same string that went to `console.debug`.
+     */
+    get lastResumeReason(): string | null {
+        return this.resumeReason;
     }
 
     /** True when a persisted session pointer exists (drives the resume path). */
@@ -598,6 +625,20 @@ export class ConversationController {
         const state = this.store.getState();
         const meta: Record<string, unknown> = {};
         if (state.identity.phone) meta.userPhone = state.identity.phone;
+        // Why this create happened, in three low-cardinality strings. `metadata_json`
+        // is persisted on the session row, so the NEXT duplicate pair can be
+        // explained from Postgres — where the audit already looks — instead of from
+        // a browser console nobody was watching (SMOODEV-3057).
+        //
+        // `storage: 'memory'` is the one that answers "was this one page load or
+        // two": a memory-only store cannot recognise its own previous visit, so
+        // EVERY page load starts from scratch and mints. Sandboxed iframes and
+        // privacy mode land here silently.
+        meta.resumeDiagnostics = {
+            storage: isStorageDurable() ? 'durable' : 'memory',
+            pointer: this.pointerState,
+            probe: this.resumeReason ?? 'not_probed',
+        };
         const consent = state.consent;
         if (consent.emailOptIn || consent.smsOptIn || consent.consentAt) {
             const c: ConsentState = {
@@ -638,10 +679,11 @@ export class ConversationController {
      * 1. Persisted pointer (ADR-048 §b): `get_session` → if not `ended`, reuse +
      *    hydrate from `get_messages` (newest-first, reversed). On ended/404 clear
      *    ONLY the pointer (identity/consent survive).
-     * 2. No persisted pointer: POST `/internal/resume-by-fingerprint` FIRST; if
-     *    `resumable`, adopt the returned session (the wrapper has primed the
-     *    operator registry), reuse the sessionId, and hydrate via get_session/
-     *    get_messages — rather than relying on createConversationSession to resume.
+     * 2. No LIVE pointer (none stored, or the stored one just turned out to be
+     *    dead): POST `/internal/resume-by-fingerprint`; if `resumable`, adopt the
+     *    returned session (the wrapper has primed the operator registry), reuse
+     *    the sessionId, and hydrate via get_session/get_messages — rather than
+     *    relying on createConversationSession to resume.
      * 3. Otherwise create a fresh session.
      */
     async connect(): Promise<void> {
@@ -695,19 +737,24 @@ export class ConversationController {
                         return;
                     }
                     // Resume failed (ended/404/gone) — clear the pointer, keep identity.
+                    this.pointerState = 'dead';
                     this.store.getState().clearSession();
-                } else {
-                    // Returning anonymous visitor with no stored pointer: ask the
-                    // wrapper to resolve a recent session for this fingerprint.
-                    const fpSessionId = await this.resumeByFingerprint();
-                    if (fpSessionId) {
-                        const resumed = await this.tryResume(fpSessionId);
-                        if (resumed) {
-                            this.store.getState().setSessionId(fpSessionId);
-                            this.setStatus('ready');
-                            return;
-                        }
-                    }
+                }
+                // A DEAD pointer falls through to the fingerprint probe too. This
+                // used to sit in an `else`, so a visitor whose stored session had
+                // died went straight to createSession() and minted a brand-new
+                // conversation even when a resumable one existed — one visitor,
+                // several inbox rows (SMOODEV-3057). The wrapper is authoritative
+                // about what is resumable; a stale local pointer is not.
+                const { sessionId: fpSessionId } = await this.resumeByFingerprint();
+                // Re-probing the id we just failed on is fine and sometimes the
+                // point: the wrapper primes the operator registry, so a resume that
+                // failed on a registry miss can succeed on this second attempt. An
+                // `ended` session is excluded server-side, so it can't come back.
+                if (fpSessionId && (await this.tryResume(fpSessionId))) {
+                    this.store.getState().setSessionId(fpSessionId);
+                    this.setStatus('ready');
+                    return;
                 }
             }
             await this.createSession();
@@ -769,18 +816,41 @@ export class ConversationController {
     /**
      * POST `/internal/resume-by-fingerprint`. Returns the resumable sessionId when
      * the wrapper found (and primed) a recent session for this fingerprint, else
-     * null. Network/route failures are swallowed → null (fall through to create).
+     * null — plus, always, the REASON.
+     *
+     * Failures stay swallowed: a resume probe must never break `connect()`. What
+     * is fixed here is only their invisibility. "No prior visit", "blocked by the
+     * CRM link", "session ended" and "the lookup 500'd" all used to arrive as a
+     * bare `null` out of a bare `catch {}`, which is why SMOODEV-3057 went
+     * undiagnosed for weeks.
      */
-    private async resumeByFingerprint(): Promise<string | null> {
+    private async resumeByFingerprint(): Promise<ResumeProbeResult> {
         try {
             const json = await this.postInternal('/internal/resume-by-fingerprint', { browserFingerprint: this.fingerprint() });
-            if (json.resumable === true && typeof json.sessionId === 'string') {
-                return json.sessionId;
+            // Tolerate BOTH response shapes. The server-side half of this fix makes
+            // `{resumable:false}` carry a `reason`; wrappers without it (every one
+            // deployed today) send none, so derive a local fallback rather than
+            // waiting on the two halves to land together.
+            const served = typeof json.reason === 'string' ? json.reason : null;
+            if (json.resumable === true) {
+                return typeof json.sessionId === 'string'
+                    ? this.noteResumeProbe(json.sessionId, served ?? 'resumable')
+                    : this.noteResumeProbe(null, served ?? 'resumable_without_session_id');
             }
-        } catch {
-            // Resume is best-effort; any failure just means a fresh session.
+            return this.noteResumeProbe(null, served ?? 'not_resumable_no_reason');
+        } catch (err) {
+            return this.noteResumeProbe(null, `probe_failed: ${err instanceof Error ? err.message : String(err)}`);
         }
-        return null;
+    }
+
+    /** Record + log a probe outcome, and hand it back. */
+    private noteResumeProbe(sessionId: string | null, reason: string): ResumeProbeResult {
+        this.resumeReason = reason;
+        // `debug`, not `warn`: a non-resumable probe is the ordinary first-visit
+        // path, not a fault. Console verbose shows it; nobody else's console is
+        // touched. This is the line that would have named the cause on day one.
+        console.debug(`[chat-widget] resume-by-fingerprint: ${sessionId ? `resumed ${sessionId}` : 'not resumed'} (${reason})`);
+        return { sessionId, reason };
     }
 
     /** `create_conversation_session` with fingerprint + identity + consent metadata. */
@@ -932,10 +1002,22 @@ export class ConversationController {
      * already `ready`.
      */
     private async recreateSession(): Promise<void> {
+        this.pointerState = 'recovery';
         this.store.getState().clearSession();
         this.sessionId = null;
         this.conversationId = null;
         await this.ensureClient();
+        // ASK before minting. A dead session id does not mean there is nothing to
+        // resume: the wrapper reads storage, so a session the per-pod registry lost
+        // (the 2026-08-23 SESSION_NOT_FOUND incident) comes back here — and gets
+        // primed — instead of the visitor's conversation splitting in two mid-chat.
+        // Bounded: send() retries this whole path exactly once, so a server that
+        // keeps saying not-found still cannot spin sessions.
+        const { sessionId: fpSessionId } = await this.resumeByFingerprint();
+        if (fpSessionId && (await this.tryResume(fpSessionId))) {
+            this.store.getState().setSessionId(fpSessionId);
+            return;
+        }
         await this.createSession();
     }
 

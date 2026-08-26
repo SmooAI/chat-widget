@@ -146,6 +146,18 @@ function memoryStorage(): PersistStorage<PersistedWidgetState> {
  * unavailable the store still works in-memory; nothing is persisted, but the
  * widget never throws on boot.
  */
+let storageDurable = true;
+
+/**
+ * False once a store has fallen back to memory — nothing survives the page load,
+ * so the widget cannot recognise its own previous visit and every load starts
+ * from scratch. Indistinguishable from a first-time visitor until you ask
+ * (SMOODEV-3057), which is why it rides the session metadata.
+ */
+export function isStorageDurable(): boolean {
+    return storageDurable;
+}
+
 function safeStorage(): PersistStorage<PersistedWidgetState> {
     let ls: Storage | null = null;
     try {
@@ -160,7 +172,10 @@ function safeStorage(): PersistStorage<PersistedWidgetState> {
         ls = null;
     }
     // Fall back to an explicit in-memory store — NEVER `undefined` (see memoryStorage).
-    if (!ls) return memoryStorage();
+    if (!ls) {
+        storageDurable = false;
+        return memoryStorage();
+    }
     const storage = ls;
     return {
         getItem: (name) => {

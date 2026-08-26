@@ -195,8 +195,41 @@ describe('ConversationController — session creation (ADR-048 §a)', () => {
         controller.setUserInfo({ name: 'Bob', consent: { emailOptIn: false, smsOptIn: false } });
         await controller.connect();
         const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
-        // No consentAt stamped → no consent block in metadata.
-        expect(create.metadata).toBeUndefined();
+        // No consentAt stamped → no consent block. (The metadata object itself now
+        // always exists — it carries resumeDiagnostics on every create.)
+        expect((create.metadata as Record<string, unknown>).consent).toBeUndefined();
+        expect((create.metadata as Record<string, unknown>).userPhone).toBeUndefined();
+    });
+
+    it('stamps resumeDiagnostics on every create so a duplicate can be explained from Postgres', async () => {
+        // metadata_json is persisted on the session row, so these three strings are
+        // queryable next to the duplicate conversations themselves (SMOODEV-3057).
+        fetchRouter = () => ({ json: { resumable: false, reason: 'crm_linked' } });
+        const { controller } = makeController();
+        await controller.connect();
+        const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
+        expect((create.metadata as Record<string, unknown>).resumeDiagnostics).toEqual({
+            storage: 'durable',
+            pointer: 'none',
+            probe: 'crm_linked',
+        });
+    });
+
+    it('reports a dead pointer distinctly from never having had one', async () => {
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-dead');
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: 'sess-dead', status: 'ended', agentId: AGENT } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+        const { controller } = makeController();
+        await controller.connect();
+        const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
+        expect((create.metadata as Record<string, unknown>).resumeDiagnostics).toMatchObject({ pointer: 'dead' });
     });
 });
 
@@ -531,6 +564,191 @@ describe('ConversationController — fingerprint resume (ADR-048 §b, HTTP)', ()
         expect(fetchCalls.some((c) => c.path === '/internal/resume-by-fingerprint')).toBe(true);
         expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeTruthy();
         expect(store.getState().sessionId).toBe('sess-new');
+    });
+});
+
+describe('ConversationController — a DEAD persisted pointer still probes the fingerprint (SMOODEV-3057)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /** get_session says `ended` for `deadId`, `active` for anything else. */
+    function deadPointerFrames(deadId: string): void {
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                const status = frame.sessionId === deadId ? 'ended' : 'active';
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status, agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({
+                    type: 'immediate_response',
+                    requestId,
+                    status: 200,
+                    data: { messages: [{ id: 'fp1', direction: 'outbound', content: { text: 'Welcome back' }, createdAt: '2026-01-01T00:00:00Z' }], hasMore: false },
+                });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+    }
+
+    it('adopts the resumable session instead of minting a duplicate conversation', async () => {
+        // The exact SMOODEV-3057 shape: a stored pointer that has died, while the
+        // wrapper still has a resumable session for this fingerprint. Before the
+        // fix the probe sat in an `else` and never ran, so this visitor got a
+        // brand-new conversation — a second inbox row for one visitor.
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-dead');
+        seed.getState().mergeIdentity({ name: 'Ada' });
+        deadPointerFrames('sess-dead');
+        fetchRouter = (path) => (path === '/internal/resume-by-fingerprint' ? { json: { resumable: true, sessionId: 'sess-FP' } } : { json: {} });
+
+        const { controller, store, onMessages } = makeController();
+        await controller.connect();
+
+        expect(fetchCalls.some((c) => c.path === '/internal/resume-by-fingerprint')).toBe(true);
+        // No duplicate: the resumable session was adopted, not a fresh one created.
+        expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeUndefined();
+        expect(store.getState().sessionId).toBe('sess-FP');
+        expect(store.getState().identity.name).toBe('Ada');
+        const snap = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string }>;
+        expect(snap.some((m) => m.text === 'Welcome back')).toBe(true);
+    });
+
+    it('still creates a fresh session when the probe has nothing to resume', async () => {
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-dead');
+        deadPointerFrames('sess-dead');
+        fetchRouter = () => ({ json: { resumable: false } });
+
+        const { controller, store } = makeController();
+        await controller.connect();
+
+        expect(fetchCalls.some((c) => c.path === '/internal/resume-by-fingerprint')).toBe(true);
+        expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeTruthy();
+        expect(store.getState().sessionId).toBe('sess-new');
+    });
+});
+
+describe('ConversationController — dead-session recovery asks before minting (SMOODEV-3057)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /** Live persisted session whose send_message comes back SESSION_NOT_FOUND. */
+    function deadOnSend(deadFor: string): void {
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId(deadFor);
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status: 'active', agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { messages: [], hasMore: false } });
+            } else if (frame.action === 'send_message' && frame.sessionId === deadFor) {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                reply({ type: 'error', requestId, data: { requestId, error: { code: 'SESSION_NOT_FOUND', message: `session '${deadFor}' not found` } } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+    }
+
+    it('recovers a registry-lost session from the wrapper instead of splitting the conversation', async () => {
+        // The 2026-08-23 shape: the id is gone from the pod's registry but alive in
+        // storage. Recovery used to mint unconditionally — a second conversation
+        // mid-chat, which is the "first row holds one turn, second holds the rest"
+        // screenshot. Now it asks first.
+        deadOnSend('sess-dead');
+        fetchRouter = (path) => (path === '/internal/resume-by-fingerprint' ? { json: { resumable: true, sessionId: 'sess-RECOVERED' } } : { json: {} });
+
+        const { controller, store } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+
+        // Nothing minted at all: resumed on connect, recovered on the dead send.
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'create_conversation_session')).toHaveLength(0);
+        expect(store.getState().sessionId).toBe('sess-RECOVERED');
+    });
+
+    it('still mints when the wrapper has nothing to recover — the turn is never dropped', async () => {
+        deadOnSend('sess-dead');
+        fetchRouter = () => ({ json: { resumable: false, reason: 'crm_linked' } });
+
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'create_conversation_session')).toHaveLength(1);
+        expect(controller.lastResumeReason).toBe('crm_linked');
+        // The visitor's turn still got answered on the fresh session.
+        const snap = onMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; text: string }>;
+        expect(snap.at(-1)?.role).toBe('assistant');
+        expect(snap.at(-1)?.text).toBe('Hi there');
+    });
+});
+
+describe('ConversationController — resume probe reason (SMOODEV-3057 observability)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    it("reports the SERVER's reason verbatim when the response carries one", async () => {
+        fetchRouter = () => ({ json: { resumable: false, reason: 'crm_linked' } });
+        const { controller } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toBe('crm_linked');
+    });
+
+    it('derives a reason when the wrapper sends none (old + new shapes both tolerated)', async () => {
+        fetchRouter = () => ({ json: { resumable: false } });
+        const { controller } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toBe('not_resumable_no_reason');
+    });
+
+    it('names a FAILED probe — and keeps it non-fatal: connect() still yields a session', async () => {
+        // The bare `catch {}` made a 500 indistinguishable from "no prior visit".
+        fetchRouter = () => ({ status: 500, json: { error: { message: 'boom' } } });
+        const { controller, store } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toMatch(/^probe_failed: /);
+        expect(controller.lastResumeReason).toContain('boom');
+        // Non-fatal: a failed probe must never break connect().
+        expect(store.getState().sessionId).toBe('sess-new');
+        expect(controller.connectionStatus).toBe('ready');
+    });
+
+    it('logs the outcome so it is legible from a live page', async () => {
+        const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+        fetchRouter = () => ({ json: { resumable: true, sessionId: 'sess-FP', reason: 'ok' } });
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status: 'active', agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { messages: [], hasMore: false } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+        const { controller } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toBe('ok');
+        expect(debug).toHaveBeenCalledWith(expect.stringContaining('resume-by-fingerprint: resumed sess-FP (ok)'));
+        debug.mockRestore();
     });
 });
 
