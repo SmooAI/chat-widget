@@ -534,6 +534,129 @@ describe('ConversationController — fingerprint resume (ADR-048 §b, HTTP)', ()
     });
 });
 
+describe('ConversationController — a DEAD persisted pointer still probes the fingerprint (SMOODEV-3057)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /** get_session says `ended` for `deadId`, `active` for anything else. */
+    function deadPointerFrames(deadId: string): void {
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                const status = frame.sessionId === deadId ? 'ended' : 'active';
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status, agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({
+                    type: 'immediate_response',
+                    requestId,
+                    status: 200,
+                    data: { messages: [{ id: 'fp1', direction: 'outbound', content: { text: 'Welcome back' }, createdAt: '2026-01-01T00:00:00Z' }], hasMore: false },
+                });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+    }
+
+    it('adopts the resumable session instead of minting a duplicate conversation', async () => {
+        // The exact SMOODEV-3057 shape: a stored pointer that has died, while the
+        // wrapper still has a resumable session for this fingerprint. Before the
+        // fix the probe sat in an `else` and never ran, so this visitor got a
+        // brand-new conversation — a second inbox row for one visitor.
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-dead');
+        seed.getState().mergeIdentity({ name: 'Ada' });
+        deadPointerFrames('sess-dead');
+        fetchRouter = (path) => (path === '/internal/resume-by-fingerprint' ? { json: { resumable: true, sessionId: 'sess-FP' } } : { json: {} });
+
+        const { controller, store, onMessages } = makeController();
+        await controller.connect();
+
+        expect(fetchCalls.some((c) => c.path === '/internal/resume-by-fingerprint')).toBe(true);
+        // No duplicate: the resumable session was adopted, not a fresh one created.
+        expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeUndefined();
+        expect(store.getState().sessionId).toBe('sess-FP');
+        expect(store.getState().identity.name).toBe('Ada');
+        const snap = onMessages.mock.calls.at(-1)?.[0] as Array<{ text: string }>;
+        expect(snap.some((m) => m.text === 'Welcome back')).toBe(true);
+    });
+
+    it('still creates a fresh session when the probe has nothing to resume', async () => {
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-dead');
+        deadPointerFrames('sess-dead');
+        fetchRouter = () => ({ json: { resumable: false } });
+
+        const { controller, store } = makeController();
+        await controller.connect();
+
+        expect(fetchCalls.some((c) => c.path === '/internal/resume-by-fingerprint')).toBe(true);
+        expect(MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session')).toBeTruthy();
+        expect(store.getState().sessionId).toBe('sess-new');
+    });
+});
+
+describe('ConversationController — resume probe reason (SMOODEV-3057 observability)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    it("reports the SERVER's reason verbatim when the response carries one", async () => {
+        fetchRouter = () => ({ json: { resumable: false, reason: 'crm_linked' } });
+        const { controller } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toBe('crm_linked');
+    });
+
+    it('derives a reason when the wrapper sends none (old + new shapes both tolerated)', async () => {
+        fetchRouter = () => ({ json: { resumable: false } });
+        const { controller } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toBe('not_resumable_no_reason');
+    });
+
+    it('names a FAILED probe — and keeps it non-fatal: connect() still yields a session', async () => {
+        // The bare `catch {}` made a 500 indistinguishable from "no prior visit".
+        fetchRouter = () => ({ status: 500, json: { error: { message: 'boom' } } });
+        const { controller, store } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toMatch(/^probe_failed: /);
+        expect(controller.lastResumeReason).toContain('boom');
+        // Non-fatal: a failed probe must never break connect().
+        expect(store.getState().sessionId).toBe('sess-new');
+        expect(controller.connectionStatus).toBe('ready');
+    });
+
+    it('logs the outcome so it is legible from a live page', async () => {
+        const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+        fetchRouter = () => ({ json: { resumable: true, sessionId: 'sess-FP', reason: 'ok' } });
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status: 'active', agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { messages: [], hasMore: false } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+        const { controller } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toBe('ok');
+        expect(debug).toHaveBeenCalledWith(expect.stringContaining('resume-by-fingerprint: resumed sess-FP (ok)'));
+        debug.mockRestore();
+    });
+});
+
 describe('ConversationController — cross-device restore (ADR-048 §c, HTTP)', () => {
     beforeEach(() => {
         localStorage.clear();
