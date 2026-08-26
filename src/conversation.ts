@@ -989,6 +989,17 @@ export class ConversationController {
         this.sessionId = null;
         this.conversationId = null;
         await this.ensureClient();
+        // ASK before minting. A dead session id does not mean there is nothing to
+        // resume: the wrapper reads storage, so a session the per-pod registry lost
+        // (the 2026-08-23 SESSION_NOT_FOUND incident) comes back here — and gets
+        // primed — instead of the visitor's conversation splitting in two mid-chat.
+        // Bounded: send() retries this whole path exactly once, so a server that
+        // keeps saying not-found still cannot spin sessions.
+        const { sessionId: fpSessionId } = await this.resumeByFingerprint();
+        if (fpSessionId && (await this.tryResume(fpSessionId))) {
+            this.store.getState().setSessionId(fpSessionId);
+            return;
+        }
         await this.createSession();
     }
 

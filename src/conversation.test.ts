@@ -601,6 +601,68 @@ describe('ConversationController — a DEAD persisted pointer still probes the f
     });
 });
 
+describe('ConversationController — dead-session recovery asks before minting (SMOODEV-3057)', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        installMockWs();
+        installMockFetch();
+        MockSocket.onFrame = defaultOnFrame;
+    });
+    afterEach(() => localStorage.clear());
+
+    /** Live persisted session whose send_message comes back SESSION_NOT_FOUND. */
+    function deadOnSend(deadFor: string): void {
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId(deadFor);
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: frame.sessionId, status: 'active', agentId: AGENT } });
+            } else if (frame.action === 'get_conversation_messages') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { messages: [], hasMore: false } });
+            } else if (frame.action === 'send_message' && frame.sessionId === deadFor) {
+                reply({ type: 'immediate_response', requestId, status: 202, data: {} });
+                reply({ type: 'error', requestId, data: { requestId, error: { code: 'SESSION_NOT_FOUND', message: `session '${deadFor}' not found` } } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+    }
+
+    it('recovers a registry-lost session from the wrapper instead of splitting the conversation', async () => {
+        // The 2026-08-23 shape: the id is gone from the pod's registry but alive in
+        // storage. Recovery used to mint unconditionally — a second conversation
+        // mid-chat, which is the "first row holds one turn, second holds the rest"
+        // screenshot. Now it asks first.
+        deadOnSend('sess-dead');
+        fetchRouter = (path) => (path === '/internal/resume-by-fingerprint' ? { json: { resumable: true, sessionId: 'sess-RECOVERED' } } : { json: {} });
+
+        const { controller, store } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+
+        // Nothing minted at all: resumed on connect, recovered on the dead send.
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'create_conversation_session')).toHaveLength(0);
+        expect(store.getState().sessionId).toBe('sess-RECOVERED');
+    });
+
+    it('still mints when the wrapper has nothing to recover — the turn is never dropped', async () => {
+        deadOnSend('sess-dead');
+        fetchRouter = () => ({ json: { resumable: false, reason: 'crm_linked' } });
+
+        const { controller, onMessages } = makeController();
+        await controller.connect();
+        await controller.send('hello');
+
+        expect(MockSocket.sentFrames.filter((f) => f.action === 'create_conversation_session')).toHaveLength(1);
+        expect(controller.lastResumeReason).toBe('crm_linked');
+        // The visitor's turn still got answered on the fresh session.
+        const snap = onMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; text: string }>;
+        expect(snap.at(-1)?.role).toBe('assistant');
+        expect(snap.at(-1)?.text).toBe('Hi there');
+    });
+});
+
 describe('ConversationController — resume probe reason (SMOODEV-3057 observability)', () => {
     beforeEach(() => {
         localStorage.clear();

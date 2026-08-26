@@ -19,3 +19,9 @@ server's when the response carries one, a derived label when it does not),
 logs it at `console.debug`, and exposes it as
 `ConversationController.lastResumeReason`. Failures stay non-fatal: a resume
 probe still never breaks `connect()`.
+
+Dead-session recovery (`send()` → `recreateSession()`) now runs the same probe
+before minting. A session id the pod's registry has lost is often still alive in
+storage, and the wrapper reads storage — so the visitor's conversation is
+recovered instead of splitting in two mid-chat. Bounded as before: `send()`
+retries this path exactly once.
