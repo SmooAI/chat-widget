@@ -705,6 +705,49 @@ describe('ConversationController — resume probe reason (SMOODEV-3057 observabi
     });
     afterEach(() => localStorage.clear());
 
+    it('carries the OTP proof on the probe — including after a dead pointer clears it (SMOODEV-3066)', async () => {
+        // clearSession() drops verifiedEmail by design, and the dead-pointer path
+        // calls it before probing. Read the proof first or a CRM-linked visitor can
+        // never resume.
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-dead');
+        seed.getState().setVerifiedEmail('ada@example.com', 'sess-verified');
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: 'sess-dead', status: 'ended', agentId: AGENT } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+        fetchRouter = () => ({ json: { resumable: false, reason: 'identity_required' } });
+
+        const { controller } = makeController();
+        await controller.connect();
+
+        const probe = fetchCalls.find((c) => c.path === '/internal/resume-by-fingerprint');
+        expect(probe?.body.verifiedSessionId).toBe('sess-verified');
+        expect(probe?.body.email).toBe('ada@example.com');
+    });
+
+    it('sends neither identity field when there is no OTP proof', async () => {
+        fetchRouter = () => ({ json: { resumable: false } });
+        const { controller } = makeController();
+        await controller.connect();
+        const probe = fetchCalls.find((c) => c.path === '/internal/resume-by-fingerprint');
+        expect(probe?.body.verifiedSessionId).toBeUndefined();
+        expect(probe?.body.email).toBeUndefined();
+    });
+
+    it('treats an UNKNOWN reason as start-fresh, so the server can add names without a client release', async () => {
+        fetchRouter = () => ({ json: { resumable: false, reason: 'some_reason_invented_next_year' } });
+        const { controller, store } = makeController();
+        await controller.connect();
+        expect(controller.lastResumeReason).toBe('some_reason_invented_next_year');
+        expect(store.getState().sessionId).toBe('sess-new');
+        expect(controller.connectionStatus).toBe('ready');
+    });
+
     it("reports the SERVER's reason verbatim when the response carries one", async () => {
         fetchRouter = () => ({ json: { resumable: false, reason: 'crm_linked' } });
         const { controller } = makeController();

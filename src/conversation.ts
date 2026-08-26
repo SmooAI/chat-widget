@@ -666,6 +666,19 @@ export class ConversationController {
         return null;
     }
 
+    /**
+     * The OTP proof this browser holds — the session it was proven on, plus the
+     * email — or null. Unlike {@link verifiedEmailForSession} this is NOT bound to
+     * the session being resumed: the fingerprint probe sends it so the server can
+     * re-read its own verification row and allow a CRM-linked match for the SAME
+     * contact (SMOODEV-3066). The server never trusts the email; it re-verifies,
+     * and its record expires 30 min after the OTP.
+     */
+    private otpProof(): { verifiedSessionId: string; email: string } | null {
+        const { verifiedEmail, verifiedEmailSessionId } = this.store.getState();
+        return verifiedEmail && verifiedEmailSessionId ? { verifiedSessionId: verifiedEmailSessionId, email: verifiedEmail } : null;
+    }
+
     /** Lazily open the WS client (default transport). Idempotent within a connect. */
     private async ensureClient(): Promise<void> {
         if (this.client) return;
@@ -729,6 +742,10 @@ export class ConversationController {
             // attempt, fall straight through to creating a fresh session.
             if (!this.resumeAttempted) {
                 this.resumeAttempted = true;
+                // Read the OTP proof BEFORE any clearSession() — that call drops it
+                // (by design: it is session-scoped), which would silently strip the
+                // one thing that lets a CRM-linked visitor resume.
+                const proof = this.otpProof();
                 const persistedSessionId = this.store.getState().sessionId;
                 if (persistedSessionId) {
                     const resumed = await this.tryResume(persistedSessionId);
@@ -746,7 +763,7 @@ export class ConversationController {
                 // conversation even when a resumable one existed — one visitor,
                 // several inbox rows (SMOODEV-3057). The wrapper is authoritative
                 // about what is resumable; a stale local pointer is not.
-                const { sessionId: fpSessionId } = await this.resumeByFingerprint();
+                const { sessionId: fpSessionId } = await this.resumeByFingerprint(proof);
                 // Re-probing the id we just failed on is fine and sometimes the
                 // point: the wrapper primes the operator registry, so a resume that
                 // failed on a registry miss can succeed on this second attempt. An
@@ -824,9 +841,12 @@ export class ConversationController {
      * bare `null` out of a bare `catch {}`, which is why SMOODEV-3057 went
      * undiagnosed for weeks.
      */
-    private async resumeByFingerprint(): Promise<ResumeProbeResult> {
+    private async resumeByFingerprint(proof: { verifiedSessionId: string; email: string } | null = null): Promise<ResumeProbeResult> {
         try {
-            const json = await this.postInternal('/internal/resume-by-fingerprint', { browserFingerprint: this.fingerprint() });
+            // `verifiedSessionId` + `email` are optional and meaningful only TOGETHER;
+            // an older wrapper parses the body as an untyped JSON value and ignores
+            // both, so sending them is safe before the server half lands.
+            const json = await this.postInternal('/internal/resume-by-fingerprint', { browserFingerprint: this.fingerprint(), ...(proof ?? {}) });
             // Tolerate BOTH response shapes. The server-side half of this fix makes
             // `{resumable:false}` carry a `reason`; wrappers without it (every one
             // deployed today) send none, so derive a local fallback rather than
@@ -1003,6 +1023,7 @@ export class ConversationController {
      */
     private async recreateSession(): Promise<void> {
         this.pointerState = 'recovery';
+        const proof = this.otpProof();
         this.store.getState().clearSession();
         this.sessionId = null;
         this.conversationId = null;
@@ -1013,7 +1034,7 @@ export class ConversationController {
         // primed — instead of the visitor's conversation splitting in two mid-chat.
         // Bounded: send() retries this whole path exactly once, so a server that
         // keeps saying not-found still cannot spin sessions.
-        const { sessionId: fpSessionId } = await this.resumeByFingerprint();
+        const { sessionId: fpSessionId } = await this.resumeByFingerprint(proof);
         if (fpSessionId && (await this.tryResume(fpSessionId))) {
             this.store.getState().setSessionId(fpSessionId);
             return;
