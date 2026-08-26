@@ -34,3 +34,10 @@ browser console nobody was watching. `storage: 'memory'` is the notable one: a
 sandboxed iframe or privacy mode silently drops the widget to an in-memory
 store, so it cannot recognise its own previous visit and every page load starts
 from scratch.
+
+The probe now carries the browser's OTP proof (`verifiedSessionId` + `email`)
+when it holds one, so the server can allow a CRM-linked match for the same
+contact (SMOODEV-3066). Both fields are optional and only meaningful together;
+an older wrapper ignores them. Read before `clearSession()`, which drops the
+session-scoped proof — otherwise the dead-pointer path would strip the one thing
+that lets an identified visitor resume.
