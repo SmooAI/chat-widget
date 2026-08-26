@@ -31,7 +31,7 @@ import { type Citation, ProtocolError, type ServerEvent, SmoothAgentClient } fro
 import type { StoreApi } from 'zustand/vanilla';
 import type { ChatWidgetConfig } from './config.js';
 import { getOrCreateFingerprint } from './fingerprint.js';
-import { type ConsentState, createWidgetStore, type WidgetStore } from './persistence.js';
+import { type ConsentState, createWidgetStore, isStorageDurable, type WidgetStore } from './persistence.js';
 
 /**
  * Derive the HTTP base for the chat-ws wrapper's `/internal/*` REST routes from
@@ -424,6 +424,8 @@ export class ConversationController {
     private resumeAttempted = false;
     /** Reason from the last fingerprint probe; null until one has run. */
     private resumeReason: string | null = null;
+    /** How this connect reached `createSession()`. Rides the session metadata. */
+    private pointerState: 'none' | 'dead' | 'recovery' = 'none';
     /** The in-flight connect, so concurrent callers await the SAME one. See {@link connect}. */
     private connecting: Promise<void> | null = null;
     /**
@@ -623,6 +625,20 @@ export class ConversationController {
         const state = this.store.getState();
         const meta: Record<string, unknown> = {};
         if (state.identity.phone) meta.userPhone = state.identity.phone;
+        // Why this create happened, in three low-cardinality strings. `metadata_json`
+        // is persisted on the session row, so the NEXT duplicate pair can be
+        // explained from Postgres — where the audit already looks — instead of from
+        // a browser console nobody was watching (SMOODEV-3057).
+        //
+        // `storage: 'memory'` is the one that answers "was this one page load or
+        // two": a memory-only store cannot recognise its own previous visit, so
+        // EVERY page load starts from scratch and mints. Sandboxed iframes and
+        // privacy mode land here silently.
+        meta.resumeDiagnostics = {
+            storage: isStorageDurable() ? 'durable' : 'memory',
+            pointer: this.pointerState,
+            probe: this.resumeReason ?? 'not_probed',
+        };
         const consent = state.consent;
         if (consent.emailOptIn || consent.smsOptIn || consent.consentAt) {
             const c: ConsentState = {
@@ -721,6 +737,7 @@ export class ConversationController {
                         return;
                     }
                     // Resume failed (ended/404/gone) — clear the pointer, keep identity.
+                    this.pointerState = 'dead';
                     this.store.getState().clearSession();
                 }
                 // A DEAD pointer falls through to the fingerprint probe too. This
@@ -985,6 +1002,7 @@ export class ConversationController {
      * already `ready`.
      */
     private async recreateSession(): Promise<void> {
+        this.pointerState = 'recovery';
         this.store.getState().clearSession();
         this.sessionId = null;
         this.conversationId = null;

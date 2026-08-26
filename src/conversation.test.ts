@@ -195,8 +195,41 @@ describe('ConversationController — session creation (ADR-048 §a)', () => {
         controller.setUserInfo({ name: 'Bob', consent: { emailOptIn: false, smsOptIn: false } });
         await controller.connect();
         const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
-        // No consentAt stamped → no consent block in metadata.
-        expect(create.metadata).toBeUndefined();
+        // No consentAt stamped → no consent block. (The metadata object itself now
+        // always exists — it carries resumeDiagnostics on every create.)
+        expect((create.metadata as Record<string, unknown>).consent).toBeUndefined();
+        expect((create.metadata as Record<string, unknown>).userPhone).toBeUndefined();
+    });
+
+    it('stamps resumeDiagnostics on every create so a duplicate can be explained from Postgres', async () => {
+        // metadata_json is persisted on the session row, so these three strings are
+        // queryable next to the duplicate conversations themselves (SMOODEV-3057).
+        fetchRouter = () => ({ json: { resumable: false, reason: 'crm_linked' } });
+        const { controller } = makeController();
+        await controller.connect();
+        const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
+        expect((create.metadata as Record<string, unknown>).resumeDiagnostics).toEqual({
+            storage: 'durable',
+            pointer: 'none',
+            probe: 'crm_linked',
+        });
+    });
+
+    it('reports a dead pointer distinctly from never having had one', async () => {
+        const seed = createWidgetStore(AGENT);
+        seed.getState().setSessionId('sess-dead');
+        MockSocket.onFrame = (frame, reply) => {
+            const requestId = frame.requestId;
+            if (frame.action === 'get_session') {
+                reply({ type: 'immediate_response', requestId, status: 200, data: { sessionId: 'sess-dead', status: 'ended', agentId: AGENT } });
+            } else {
+                defaultOnFrame(frame, reply);
+            }
+        };
+        const { controller } = makeController();
+        await controller.connect();
+        const create = MockSocket.sentFrames.find((f) => f.action === 'create_conversation_session') as Record<string, unknown>;
+        expect((create.metadata as Record<string, unknown>).resumeDiagnostics).toMatchObject({ pointer: 'dead' });
     });
 });
 

@@ -25,3 +25,12 @@ before minting. A session id the pod's registry has lost is often still alive in
 storage, and the wrapper reads storage — so the visitor's conversation is
 recovered instead of splitting in two mid-chat. Bounded as before: `send()`
 retries this path exactly once.
+
+Every `create_conversation_session` now carries a `resumeDiagnostics` block in
+its metadata — `storage` (durable/memory), `pointer` (none/dead/recovery) and
+`probe` (the resume reason). `metadata_json` is persisted on the session row, so
+the next duplicate pair can be explained from Postgres rather than from a
+browser console nobody was watching. `storage: 'memory'` is the notable one: a
+sandboxed iframe or privacy mode silently drops the widget to an in-memory
+store, so it cannot recognise its own previous visit and every page load starts
+from scratch.
